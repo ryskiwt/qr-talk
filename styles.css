@@ -299,6 +299,31 @@ main {
   gap: 14px;
 }
 
+.name-panel {
+  padding: 14px;
+  display: grid;
+  gap: 8px;
+}
+
+.name-panel label {
+  color: var(--muted);
+  font-size: 0.86rem;
+}
+
+.name-panel input {
+  width: 100%;
+  min-height: 42px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 0 10px;
+  color: var(--text);
+  background: #0b1117;
+}
+
+.name-panel input::placeholder {
+  color: color-mix(in srgb, var(--muted) 82%, transparent);
+}
+
 .control-grid {
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
