@@ -76,6 +76,7 @@
     muteButtonText: $("#muteButtonText"),
     pocketLockButton: $("#pocketLockButton"),
     leaveButton: $("#leaveButton"),
+    displayNameInput: $("#displayNameInput"),
     audioInputSelect: $("#audioInputSelect"),
     audioOutputSelect: $("#audioOutputSelect"),
     audioUnlockButton: $("#audioUnlockButton"),
@@ -132,6 +133,7 @@
     hostReconnectTimer: null,
     hostReconnectAttempts: 0,
     roomEstablished: false,
+    displayName: "",
   };
 
   document.addEventListener("DOMContentLoaded", init);
@@ -139,6 +141,7 @@
   function init() {
     bindEvents();
     updateMuteButton();
+    updateDisplayNameInput();
     const roomId = extractRoomId(window.location.href);
     if (roomId) {
       state.pendingRoomId = roomId;
@@ -172,6 +175,7 @@
     els.muteButton.addEventListener("click", () => toggleMute().catch(handleFatalError));
     els.pocketLockButton.addEventListener("click", enablePocketLock);
     els.copyLinkButton.addEventListener("click", copyRoomLink);
+    els.displayNameInput.addEventListener("input", onDisplayNameInput);
     els.audioInputSelect.addEventListener("change", onInputDeviceChange);
     els.audioOutputSelect.addEventListener("change", onOutputDeviceChange);
     els.audioUnlockButton.addEventListener("click", unlockRemoteAudio);
@@ -292,9 +296,10 @@
       state.hostId = role === "host" ? peerId : null;
       state.roomEstablished = role === "host";
       state.participants.set(peerId, {
-        label: "自分",
+        label: getLocalParticipantLabel(),
         state: "自分",
       });
+      updateDisplayNameInput();
 
       if (role === "host") {
         await ensureRoomServicePeer();
@@ -567,7 +572,11 @@
       connection.on("open", () => {
         opened = true;
         state.hostReconnectAttempts = 0;
-        sendData(connection, { type: "join", peerId: state.peerId });
+        sendData(connection, {
+          type: "join",
+          peerId: state.peerId,
+          displayName: state.displayName,
+        });
         shareLocalLocation();
         updateConnectionBadge("接続中");
         settleResolve();
@@ -641,17 +650,24 @@
         return;
       }
       if (message.type === "join") {
-        acceptParticipant(connection);
+        acceptParticipant(connection, message);
       }
       if (message.type === "leave") {
         removeParticipant(remotePeerId, { broadcast: true });
       }
       if (message.type === "heartbeat") {
         touchParticipant(remotePeerId, "接続中");
+        maybeUpdateParticipantName(remotePeerId, message.displayName);
       }
       if (message.type === "location-update") {
         touchParticipant(remotePeerId, "接続中");
+        maybeUpdateParticipantName(remotePeerId, message.displayName);
         setParticipantLocation(remotePeerId, message.location);
+      }
+      if (message.type === "name-update") {
+        touchParticipant(remotePeerId, "接続中");
+        maybeUpdateParticipantName(remotePeerId, message.displayName);
+        broadcastRoster();
       }
     });
     connection.on("close", () => {
@@ -666,15 +682,16 @@
     });
   }
 
-  function acceptParticipant(connection) {
+  function acceptParticipant(connection, message = {}) {
     const remotePeerId = connection.peer;
     const isNewParticipant = !state.participants.has(remotePeerId);
     const existingPeers = [...state.participants.keys()].filter((peerId) => peerId !== remotePeerId);
     const existingParticipant = state.participants.get(remotePeerId) || {};
+    const remoteLabel = formatParticipantLabel(message.displayName, remotePeerId);
 
     state.participants.set(remotePeerId, {
       ...existingParticipant,
-      label: shortId(remotePeerId),
+      label: remoteLabel,
       state: "接続中",
       lastSeen: Date.now(),
     });
@@ -687,6 +704,7 @@
       roomId: state.roomId,
       hostId: state.peerId,
       peers: existingPeers,
+      names: serializeParticipantNames(),
       locations: serializeParticipantLocations(),
     });
     broadcastHostMessage({ type: "peer-joined", peerId: remotePeerId }, remotePeerId);
@@ -715,6 +733,7 @@
           addParticipant(peerId, "接続中");
           callPeer(peerId).catch(() => setParticipantState(peerId, "接続エラー"));
         });
+      applyParticipantNames(message.names);
       applyParticipantLocations(message.locations);
       setRoomUrl(state.roomId);
       updateRoomStatus();
@@ -1732,7 +1751,11 @@
     }
 
     if (state.hostConnection?.open) {
-      sendData(state.hostConnection, { type: "heartbeat", peerId: state.peerId });
+      sendData(state.hostConnection, {
+        type: "heartbeat",
+        peerId: state.peerId,
+        displayName: state.displayName,
+      });
     }
   }
 
@@ -1759,6 +1782,7 @@
       roomId: state.roomId,
       hostId: state.peerId,
       peers: [...state.participants.keys()],
+      names: serializeParticipantNames(),
       locations: serializeParticipantLocations(),
     });
   }
@@ -1797,6 +1821,7 @@
       state.participants.set(peerId, participant);
     });
 
+    applyParticipantNames(message.names);
     applyParticipantLocations(message.locations);
 
     [...state.participants.keys()].forEach((peerId) => {
@@ -1989,7 +2014,110 @@
     sendData(state.hostConnection, {
       type: "location-update",
       peerId: state.peerId,
+      displayName: state.displayName,
       location,
+    });
+  }
+
+  function onDisplayNameInput() {
+    if (!els.displayNameInput) {
+      return;
+    }
+
+    state.displayName = sanitizeDisplayName(els.displayNameInput.value);
+    updateLocalParticipantLabel();
+    syncDisplayName();
+  }
+
+  function updateDisplayNameInput() {
+    if (!els.displayNameInput) {
+      return;
+    }
+    if (els.displayNameInput.value !== state.displayName) {
+      els.displayNameInput.value = state.displayName;
+    }
+    els.displayNameInput.placeholder = shortId(state.peerId) || "自分";
+  }
+
+  function updateLocalParticipantLabel() {
+    if (!state.peerId || !state.participants.has(state.peerId)) {
+      return;
+    }
+    const selfParticipant = state.participants.get(state.peerId) || {};
+    selfParticipant.label = getLocalParticipantLabel();
+    state.participants.set(state.peerId, selfParticipant);
+    renderParticipants();
+  }
+
+  function syncDisplayName() {
+    if (state.mode !== "room" || !state.peerId) {
+      return;
+    }
+    if (state.role === "host") {
+      broadcastRoster();
+      return;
+    }
+    sendData(state.hostConnection, {
+      type: "name-update",
+      peerId: state.peerId,
+      displayName: state.displayName,
+    });
+  }
+
+  function getLocalParticipantLabel() {
+    return formatParticipantLabel(state.displayName, state.peerId);
+  }
+
+  function formatParticipantLabel(displayName, peerId) {
+    const sanitized = sanitizeDisplayName(displayName);
+    if (sanitized) {
+      return sanitized;
+    }
+    return shortId(peerId) || "自分";
+  }
+
+  function sanitizeDisplayName(value) {
+    if (typeof value !== "string") {
+      return "";
+    }
+    return value.trim().slice(0, 32);
+  }
+
+  function maybeUpdateParticipantName(peerId, displayName) {
+    if (!peerId || peerId === state.peerId || !state.participants.has(peerId)) {
+      return;
+    }
+    const participant = state.participants.get(peerId);
+    const nextLabel = formatParticipantLabel(displayName, peerId);
+    if (participant.label === nextLabel) {
+      return;
+    }
+    participant.label = nextLabel;
+    state.participants.set(peerId, participant);
+    renderParticipants();
+  }
+
+  function serializeParticipantNames() {
+    return Object.fromEntries(
+      [...state.participants.entries()].map(([peerId, participant]) => [
+        peerId,
+        participant.label || shortId(peerId),
+      ]),
+    );
+  }
+
+  function applyParticipantNames(names) {
+    if (!names || typeof names !== "object") {
+      return;
+    }
+
+    Object.entries(names).forEach(([peerId, label]) => {
+      if (!isValidPeerId(peerId) || peerId === state.peerId || !state.participants.has(peerId)) {
+        return;
+      }
+      const participant = state.participants.get(peerId);
+      participant.label = formatParticipantLabel(label, peerId);
+      state.participants.set(peerId, participant);
     });
   }
 
@@ -2457,6 +2585,7 @@
     state.participants.clear();
     updateMuteButton();
     updateMediaSessionState();
+    updateDisplayNameInput();
     els.audioUnlockButton.classList.add("hidden");
     disablePocketLock();
   }

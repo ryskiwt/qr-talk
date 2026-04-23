@@ -86,8 +86,8 @@
               <button class="small-button" id="copyLinkButton" type="button">リンクをコピー</button>
             </div>
 
-            <div class="room-controls">
-              <div class="control-grid">
+              <div class="room-controls">
+                <div class="control-grid">
                 <button class="control-button mute-button" id="muteButton" type="button" aria-pressed="false">
                   <span class="mute-icon" aria-hidden="true">
                     <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" focusable="false">
@@ -101,12 +101,17 @@
                   <span id="muteButtonText">ミュート OFF</span>
                 </button>
                 <button class="control-button" id="pocketLockButton" type="button">ポケットロック</button>
-                <button class="control-button control-button-danger" id="leaveButton" type="button">退出</button>
-              </div>
+                  <button class="control-button control-button-danger" id="leaveButton" type="button">退出</button>
+                </div>
 
-              <div class="device-panel">
-                <label for="audioInputSelect">マイク</label>
-                <select id="audioInputSelect"></select>
+                <div class="name-panel">
+                  <label for="displayNameInput">ルーム内での名前（任意）</label>
+                  <input id="displayNameInput" type="text" maxlength="32" autocomplete="nickname" spellcheck="false">
+                </div>
+
+                <div class="device-panel">
+                  <label for="audioInputSelect">マイク</label>
+                  <select id="audioInputSelect"></select>
                 <label for="audioOutputSelect">スピーカー</label>
                 <select id="audioOutputSelect"></select>
               </div>
