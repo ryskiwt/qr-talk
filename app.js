@@ -27,6 +27,13 @@
   const PROXIMITY_MIN_GAIN = 0.22;
   const PROXIMITY_GAIN_LEVELS = [1, 0.72, 0.46, PROXIMITY_MIN_GAIN];
   const PROXIMITY_SCORE_THRESHOLD = 0.45;
+  const PROXIMITY_MIN_VOICE_DECISIONS = 2;
+  const VAD_MIN_VOICE_ENERGY = 0.035;
+  const VAD_MIN_VOICE_RATIO = 0.42;
+  const VAD_INITIAL_NOISE_FLOOR = 0.008;
+  const VAD_NOISE_MULTIPLIER = 2.4;
+  const VAD_NOISE_OFFSET = 0.012;
+  const VAD_HANGOVER_TICKS = 1;
   const UNLOCK_HOLD_MS = 1200;
 
   const $ = (selector) => document.querySelector(selector);
@@ -86,6 +93,7 @@
     localAudioSource: null,
     localAnalyser: null,
     localFrequencyData: null,
+    localVad: null,
     localFeatureHistory: [],
     silentAudioSource: null,
     silentAudioGain: null,
@@ -530,6 +538,7 @@
         source,
         analyser,
         frequencyData: new Uint8Array(analyser.frequencyBinCount),
+        vad: createVadState(),
         proximityDecisions: [],
         lastLevelDecisionAt: 0,
         levelIndex: 0,
@@ -1486,10 +1495,12 @@
       state.localAudioSource = source;
       state.localAnalyser = analyser;
       state.localFrequencyData = new Uint8Array(analyser.frequencyBinCount);
+      state.localVad = createVadState();
       state.localFeatureHistory = [];
     } catch {
       state.localAnalyser = null;
       state.localFrequencyData = null;
+      state.localVad = null;
     }
   }
 
@@ -1504,6 +1515,7 @@
     state.localAudioSource = null;
     state.localAnalyser = null;
     state.localFrequencyData = null;
+    state.localVad = null;
     state.localFeatureHistory = [];
   }
 
@@ -1554,18 +1566,27 @@
     }
 
     const now = performance.now();
-    const localFeature = readAudioFeature(state.localAnalyser, state.localFrequencyData);
-    state.localFeatureHistory.push({ ...localFeature, time: now });
+    const localFeature = readAudioFeature(state.localAnalyser, state.localFrequencyData, state.localVad);
+    if (localFeature.active) {
+      state.localFeatureHistory.push({ ...localFeature, time: now });
+    }
     state.localFeatureHistory = state.localFeatureHistory.filter((feature) => now - feature.time <= PROXIMITY_HISTORY_MS);
 
     state.remoteProcessors.forEach((processor, peerId) => {
-      const remoteFeature = readAudioFeature(processor.analyser, processor.frequencyData);
-      const proximityScore = estimateProximityScore(remoteFeature, now);
-      updateRemoteSuppression(peerId, processor, proximityScore);
+      const remoteFeature = readAudioFeature(processor.analyser, processor.frequencyData, processor.vad);
+      const proximityResult = estimateProximity(remoteFeature, now);
+      updateRemoteSuppression(peerId, processor, proximityResult);
     });
   }
 
-  function readAudioFeature(analyser, frequencyData) {
+  function createVadState() {
+    return {
+      noiseFloor: VAD_INITIAL_NOISE_FLOOR,
+      hangover: 0,
+    };
+  }
+
+  function readAudioFeature(analyser, frequencyData, vadState) {
     analyser.getByteFrequencyData(frequencyData);
 
     const sampleRate = state.audioContext?.sampleRate || 48000;
@@ -1579,13 +1600,46 @@
       averageFrequencyRange(frequencyData, nyquist, 3400, 5200),
     ];
     const voiceEnergy = bands.slice(0, 5).reduce((sum, value) => sum + value, 0) / 5;
+    const fullEnergy = averageFrequencyRange(frequencyData, nyquist, 80, 7000);
+    const voiceRatio = voiceEnergy / (fullEnergy || 1);
+    const active = detectVoice(vadState, voiceEnergy, voiceRatio);
     const norm = Math.hypot(...bands) || 1;
 
     return {
-      active: voiceEnergy > 0.045,
+      active,
       energy: voiceEnergy,
+      voiceRatio,
       bands: bands.map((value) => value / norm),
     };
+  }
+
+  function detectVoice(vadState, voiceEnergy, voiceRatio) {
+    if (!vadState) {
+      return voiceEnergy > VAD_MIN_VOICE_ENERGY && voiceRatio >= VAD_MIN_VOICE_RATIO;
+    }
+
+    const noiseFloor = vadState.noiseFloor ?? VAD_INITIAL_NOISE_FLOOR;
+    const voiceThreshold = Math.max(
+      VAD_MIN_VOICE_ENERGY,
+      noiseFloor * VAD_NOISE_MULTIPLIER + VAD_NOISE_OFFSET,
+    );
+    const rawActive = voiceEnergy >= voiceThreshold && voiceRatio >= VAD_MIN_VOICE_RATIO;
+    const hangoverActive = vadState.hangover > 0 && voiceEnergy >= voiceThreshold * 0.65;
+    const active = rawActive || hangoverActive;
+
+    if (rawActive) {
+      vadState.hangover = VAD_HANGOVER_TICKS;
+    } else if (vadState.hangover > 0) {
+      vadState.hangover -= 1;
+    }
+
+    if (active) {
+      vadState.noiseFloor = noiseFloor * 0.995 + Math.min(voiceEnergy, noiseFloor) * 0.005;
+    } else {
+      vadState.noiseFloor = noiseFloor * 0.92 + Math.min(voiceEnergy, 0.18) * 0.08;
+    }
+
+    return active;
   }
 
   function averageFrequencyRange(frequencyData, nyquist, minFrequency, maxFrequency) {
@@ -1602,25 +1656,32 @@
     return count > 0 ? total / count : 0;
   }
 
-  function estimateProximityScore(remoteFeature, now) {
+  function estimateProximity(remoteFeature, now) {
     if (!remoteFeature.active) {
-      return 0;
+      return null;
     }
 
     let bestSimilarity = 0;
+    let candidateCount = 0;
     state.localFeatureHistory.forEach((localFeature) => {
       const lag = now - localFeature.time;
-      if (!localFeature.active || lag < PROXIMITY_MIN_LAG_MS || lag > PROXIMITY_MAX_LAG_MS) {
+      if (lag < PROXIMITY_MIN_LAG_MS || lag > PROXIMITY_MAX_LAG_MS) {
         return;
       }
 
+      candidateCount += 1;
       const similarity = cosineSimilarity(localFeature.bands, remoteFeature.bands);
       if (similarity > bestSimilarity) {
         bestSimilarity = similarity;
       }
     });
 
-    return clamp((bestSimilarity - 0.72) / 0.2, 0, 1);
+    const score = candidateCount > 0 ? clamp((bestSimilarity - 0.72) / 0.2, 0, 1) : 0;
+    return {
+      score,
+      detected: score >= PROXIMITY_SCORE_THRESHOLD,
+      candidateCount,
+    };
   }
 
   function cosineSimilarity(left, right) {
@@ -1637,18 +1698,29 @@
     return dot / ((Math.sqrt(leftNorm) * Math.sqrt(rightNorm)) || 1);
   }
 
-  function updateRemoteSuppression(peerId, processor, proximityScore) {
+  function updateRemoteSuppression(peerId, processor, proximityResult) {
     const now = performance.now();
-    processor.proximityDecisions.push({
-      time: now,
-      score: proximityScore,
-      detected: proximityScore >= PROXIMITY_SCORE_THRESHOLD,
-    });
     processor.proximityDecisions = processor.proximityDecisions.filter(
       (decision) => now - decision.time <= PROXIMITY_DECISION_WINDOW_MS,
     );
+    const hadRecentVoiceDecision = processor.proximityDecisions.length > 0;
 
-    if (!processor.lastLevelDecisionAt || now - processor.lastLevelDecisionAt >= PROXIMITY_DECISION_INTERVAL_MS) {
+    if (proximityResult) {
+      processor.proximityDecisions.push({
+        time: now,
+        score: proximityResult.score,
+        detected: proximityResult.detected,
+        candidateCount: proximityResult.candidateCount,
+      });
+    }
+
+    if (proximityResult && !hadRecentVoiceDecision) {
+      processor.lastLevelDecisionAt = now;
+    } else if (
+      proximityResult
+      && now - processor.lastLevelDecisionAt >= PROXIMITY_DECISION_INTERVAL_MS
+      && processor.proximityDecisions.length >= PROXIMITY_MIN_VOICE_DECISIONS
+    ) {
       processor.lastLevelDecisionAt = now;
       updateSuppressionLevel(processor);
     }
@@ -1675,9 +1747,7 @@
 
   function updateSuppressionLevel(processor) {
     const decisions = processor.proximityDecisions;
-    if (decisions.length === 0) {
-      processor.levelIndex = Math.max(0, processor.levelIndex - 1);
-      processor.targetGain = PROXIMITY_GAIN_LEVELS[processor.levelIndex];
+    if (decisions.length < PROXIMITY_MIN_VOICE_DECISIONS) {
       return;
     }
 
