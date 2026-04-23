@@ -36,6 +36,11 @@
   const VAD_NOISE_MULTIPLIER = 2.4;
   const VAD_NOISE_OFFSET = 0.012;
   const VAD_HANGOVER_TICKS = 1;
+  const LOCATION_WATCH_MAXIMUM_AGE_MS = 15000;
+  const LOCATION_WATCH_TIMEOUT_MS = 20000;
+  const LOCATION_STALE_MS = 45000;
+  const LOCATION_MAX_ACCURACY_M = 80;
+  const LOCATION_FAR_SKIP_DISTANCE_M = 35;
   const UNLOCK_HOLD_MS = 1200;
   const HEADSET_ACTION_DEBOUNCE_MS = 550;
   const HEADSET_MUTE_TOGGLE_ACTIONS = ["togglemicrophone", "hangup", "play", "pause", "stop"];
@@ -109,6 +114,8 @@
     localFrequencyData: null,
     localVad: null,
     localFeatureHistory: [],
+    locationWatchId: null,
+    locationNoticeShown: false,
     silentAudioSource: null,
     silentAudioGain: null,
     silentAudioDestination: null,
@@ -299,6 +306,7 @@
       setRoomUrl(state.roomId);
       startPresenceMonitor();
       startProximityMonitor();
+      startLocationMonitor();
       await requestWakeLock();
 
       if (role === "guest") {
@@ -560,6 +568,7 @@
         opened = true;
         state.hostReconnectAttempts = 0;
         sendData(connection, { type: "join", peerId: state.peerId });
+        shareLocalLocation();
         updateConnectionBadge("接続中");
         settleResolve();
       });
@@ -640,6 +649,10 @@
       if (message.type === "heartbeat") {
         touchParticipant(remotePeerId, "接続中");
       }
+      if (message.type === "location-update") {
+        touchParticipant(remotePeerId, "接続中");
+        setParticipantLocation(remotePeerId, message.location);
+      }
     });
     connection.on("close", () => {
       if (!state.isLeaving) {
@@ -657,8 +670,10 @@
     const remotePeerId = connection.peer;
     const isNewParticipant = !state.participants.has(remotePeerId);
     const existingPeers = [...state.participants.keys()].filter((peerId) => peerId !== remotePeerId);
+    const existingParticipant = state.participants.get(remotePeerId) || {};
 
     state.participants.set(remotePeerId, {
+      ...existingParticipant,
       label: shortId(remotePeerId),
       state: "接続中",
       lastSeen: Date.now(),
@@ -672,6 +687,7 @@
       roomId: state.roomId,
       hostId: state.peerId,
       peers: existingPeers,
+      locations: serializeParticipantLocations(),
     });
     broadcastHostMessage({ type: "peer-joined", peerId: remotePeerId }, remotePeerId);
     broadcastRoster();
@@ -699,6 +715,7 @@
           addParticipant(peerId, "接続中");
           callPeer(peerId).catch(() => setParticipantState(peerId, "接続エラー"));
         });
+      applyParticipantLocations(message.locations);
       setRoomUrl(state.roomId);
       updateRoomStatus();
       renderParticipants();
@@ -1742,6 +1759,7 @@
       roomId: state.roomId,
       hostId: state.peerId,
       peers: [...state.participants.keys()],
+      locations: serializeParticipantLocations(),
     });
   }
 
@@ -1778,6 +1796,8 @@
       }
       state.participants.set(peerId, participant);
     });
+
+    applyParticipantLocations(message.locations);
 
     [...state.participants.keys()].forEach((peerId) => {
       if (peerId !== state.peerId && !rosterPeerIds.has(peerId)) {
@@ -1910,6 +1930,203 @@
     state.silentAudioTrack = null;
   }
 
+  function startLocationMonitor() {
+    stopLocationMonitor();
+
+    if (!navigator.geolocation || !window.isSecureContext) {
+      return;
+    }
+
+    try {
+      state.locationWatchId = navigator.geolocation.watchPosition(
+        (position) => handleLocalPosition(position),
+        (error) => handleLocationError(error),
+        {
+          enableHighAccuracy: false,
+          maximumAge: LOCATION_WATCH_MAXIMUM_AGE_MS,
+          timeout: LOCATION_WATCH_TIMEOUT_MS,
+        },
+      );
+    } catch {
+      state.locationWatchId = null;
+    }
+  }
+
+  function stopLocationMonitor() {
+    if (state.locationWatchId !== null && navigator.geolocation) {
+      navigator.geolocation.clearWatch(state.locationWatchId);
+    }
+    state.locationWatchId = null;
+  }
+
+  function handleLocalPosition(position) {
+    const sharedLocation = createSharedLocation(position);
+    if (!sharedLocation || !state.peerId) {
+      return;
+    }
+
+    setParticipantLocation(state.peerId, sharedLocation);
+    shareLocalLocation(sharedLocation);
+  }
+
+  function handleLocationError(error) {
+    if (
+      error?.code === error?.PERMISSION_DENIED
+      && !state.locationNoticeShown
+      && state.mode === "room"
+    ) {
+      stopLocationMonitor();
+      state.locationNoticeShown = true;
+      showToast("位置情報が使えないため、遠距離判定は音声のみになります。");
+    }
+  }
+
+  function shareLocalLocation(location = getParticipantLocation(state.peerId)) {
+    if (!location || state.role !== "guest" || !state.hostConnection?.open) {
+      return;
+    }
+
+    sendData(state.hostConnection, {
+      type: "location-update",
+      peerId: state.peerId,
+      location,
+    });
+  }
+
+  function createSharedLocation(position) {
+    const coords = position?.coords;
+    if (!coords) {
+      return null;
+    }
+
+    return normalizeSharedLocation({
+      lat: coords.latitude,
+      lng: coords.longitude,
+      accuracy: coords.accuracy,
+      timestamp: position.timestamp || Date.now(),
+    });
+  }
+
+  function normalizeSharedLocation(location) {
+    if (!location || typeof location !== "object") {
+      return null;
+    }
+
+    const lat = Number(location.lat);
+    const lng = Number(location.lng);
+    const accuracy = Number(location.accuracy);
+    const timestamp = Number(location.timestamp || Date.now());
+
+    if (
+      !Number.isFinite(lat)
+      || !Number.isFinite(lng)
+      || !Number.isFinite(accuracy)
+      || !Number.isFinite(timestamp)
+      || lat < -90
+      || lat > 90
+      || lng < -180
+      || lng > 180
+      || accuracy < 0
+    ) {
+      return null;
+    }
+
+    return {
+      lat: roundNumber(lat, 6),
+      lng: roundNumber(lng, 6),
+      accuracy: roundNumber(accuracy, 1),
+      timestamp,
+    };
+  }
+
+  function roundNumber(value, digits) {
+    const factor = 10 ** digits;
+    return Math.round(value * factor) / factor;
+  }
+
+  function getParticipantLocation(peerId) {
+    return state.participants.get(peerId)?.location || null;
+  }
+
+  function setParticipantLocation(peerId, location) {
+    if (!peerId || !state.participants.has(peerId)) {
+      return;
+    }
+
+    const participant = state.participants.get(peerId);
+    participant.location = normalizeSharedLocation(location);
+    state.participants.set(peerId, participant);
+  }
+
+  function serializeParticipantLocations() {
+    return Object.fromEntries(
+      [...state.participants.entries()].map(([peerId, participant]) => [peerId, participant.location || null]),
+    );
+  }
+
+  function applyParticipantLocations(locations) {
+    if (!locations || typeof locations !== "object") {
+      return;
+    }
+
+    Object.entries(locations).forEach(([peerId, location]) => {
+      if (peerId === state.peerId || !state.participants.has(peerId)) {
+        return;
+      }
+
+      const participant = state.participants.get(peerId);
+      participant.location = normalizeSharedLocation(location);
+      state.participants.set(peerId, participant);
+    });
+  }
+
+  function evaluateLocationGate(peerId) {
+    const localLocation = getParticipantLocation(state.peerId);
+    const remoteLocation = getParticipantLocation(peerId);
+
+    if (!isFreshUsableLocation(localLocation) || !isFreshUsableLocation(remoteLocation)) {
+      return { skip: false };
+    }
+
+    const distance = calculateDistanceMeters(localLocation, remoteLocation);
+    const minPossibleDistance = Math.max(0, distance - localLocation.accuracy - remoteLocation.accuracy);
+
+    return {
+      skip: minPossibleDistance >= LOCATION_FAR_SKIP_DISTANCE_M,
+      distance,
+      minPossibleDistance,
+    };
+  }
+
+  function isFreshUsableLocation(location) {
+    return Boolean(
+      location
+      && Number.isFinite(location.lat)
+      && Number.isFinite(location.lng)
+      && Number.isFinite(location.accuracy)
+      && Number.isFinite(location.timestamp)
+      && location.accuracy <= LOCATION_MAX_ACCURACY_M
+      && Date.now() - location.timestamp <= LOCATION_STALE_MS,
+    );
+  }
+
+  function calculateDistanceMeters(left, right) {
+    const earthRadiusM = 6371000;
+    const lat1 = degreesToRadians(left.lat);
+    const lat2 = degreesToRadians(right.lat);
+    const deltaLat = degreesToRadians(right.lat - left.lat);
+    const deltaLng = degreesToRadians(right.lng - left.lng);
+    const sinLat = Math.sin(deltaLat / 2);
+    const sinLng = Math.sin(deltaLng / 2);
+    const a = sinLat * sinLat
+      + Math.cos(lat1) * Math.cos(lat2) * sinLng * sinLng;
+    return earthRadiusM * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(Math.max(0, 1 - a)));
+  }
+
+  function degreesToRadians(value) {
+    return (value * Math.PI) / 180;
+  }
+
   function startProximityMonitor() {
     stopProximityMonitor();
     state.proximityTimer = window.setInterval(runProximityTick, PROXIMITY_INTERVAL_MS);
@@ -1935,6 +2152,12 @@
     state.localFeatureHistory = state.localFeatureHistory.filter((feature) => now - feature.time <= PROXIMITY_HISTORY_MS);
 
     state.remoteProcessors.forEach((processor, peerId) => {
+      const locationGate = evaluateLocationGate(peerId);
+      if (locationGate.skip) {
+        releaseRemoteSuppression(peerId, processor);
+        return;
+      }
+
       const remoteFeature = readAudioFeature(processor.analyser, processor.frequencyData, processor.vad);
       const proximityResult = estimateProximity(remoteFeature, now);
       updateRemoteSuppression(peerId, processor, proximityResult);
@@ -2087,6 +2310,18 @@
       updateSuppressionLevel(processor);
     }
 
+    applyRemoteGain(peerId, processor);
+  }
+
+  function releaseRemoteSuppression(peerId, processor) {
+    processor.proximityDecisions = [];
+    processor.lastLevelDecisionAt = 0;
+    processor.levelIndex = 0;
+    processor.targetGain = 1;
+    applyRemoteGain(peerId, processor);
+  }
+
+  function applyRemoteGain(peerId, processor) {
     const gainStep = 0.16;
     if (Math.abs(processor.currentGain - processor.targetGain) <= gainStep) {
       processor.currentGain = processor.targetGain;
@@ -2174,6 +2409,7 @@
   function stopRoomResources() {
     stopPresenceMonitor();
     stopProximityMonitor();
+    stopLocationMonitor();
     releaseWakeLock();
     cancelHostReconnect();
     disconnectLocalAudioAnalysis();
@@ -2216,6 +2452,7 @@
     state.muted = false;
     state.lastHeadsetActionAt = 0;
     state.hostReconnectAttempts = 0;
+    state.locationNoticeShown = false;
     state.roomEstablished = false;
     state.participants.clear();
     updateMuteButton();
