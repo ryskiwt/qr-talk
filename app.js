@@ -18,6 +18,11 @@
   const SCAN_INTERVAL_MS = 180;
   const HEARTBEAT_INTERVAL_MS = 4000;
   const PARTICIPANT_TIMEOUT_MS = 14000;
+  const PROXIMITY_INTERVAL_MS = 120;
+  const PROXIMITY_HISTORY_MS = 1400;
+  const PROXIMITY_MIN_LAG_MS = 80;
+  const PROXIMITY_MAX_LAG_MS = 900;
+  const PROXIMITY_MIN_GAIN = 0.22;
   const UNLOCK_HOLD_MS = 1200;
 
   const $ = (selector) => document.querySelector(selector);
@@ -70,8 +75,15 @@
     dataConnections: new Map(),
     mediaConnections: new Map(),
     remoteAudios: new Map(),
+    remoteProcessors: new Map(),
     participants: new Map(),
     presenceTimer: null,
+    proximityTimer: null,
+    audioContext: null,
+    localAudioSource: null,
+    localAnalyser: null,
+    localFrequencyData: null,
+    localFeatureHistory: [],
     isLeaving: false,
     suppressHostCloseNotice: false,
     muted: false,
@@ -154,6 +166,7 @@
 
     try {
       state.localStream = await getAudioStream();
+      await setupLocalAudioAnalysis();
       await populateDevices();
 
       state.role = role;
@@ -174,6 +187,7 @@
       await renderRoomQr();
       setRoomUrl(state.roomId);
       startPresenceMonitor();
+      startProximityMonitor();
       await requestWakeLock();
 
       if (role === "guest") {
@@ -408,10 +422,10 @@
     });
     call.on("close", () => {
       if (state.mediaConnections.get(peerId) === call) {
-      state.mediaConnections.delete(peerId);
-      detachRemoteAudio(peerId);
-      setParticipantState(peerId, "未接続");
-    }
+        state.mediaConnections.delete(peerId);
+        detachRemoteAudio(peerId);
+        setParticipantState(peerId, "未接続");
+      }
     });
     call.on("error", () => setParticipantState(peerId, "接続エラー"));
   }
@@ -422,7 +436,7 @@
     const audio = document.createElement("audio");
     audio.autoplay = true;
     audio.playsInline = true;
-    audio.srcObject = stream;
+    audio.srcObject = await createRemotePlaybackStream(peerId, stream);
     audio.dataset.peerId = peerId;
     els.remoteAudioMount.append(audio);
     state.remoteAudios.set(peerId, audio);
@@ -440,6 +454,8 @@
   }
 
   function detachRemoteAudio(peerId) {
+    disconnectRemoteProcessor(peerId);
+
     const audio = state.remoteAudios.get(peerId);
     if (!audio) {
       return;
@@ -447,6 +463,57 @@
     audio.srcObject = null;
     audio.remove();
     state.remoteAudios.delete(peerId);
+  }
+
+  async function createRemotePlaybackStream(peerId, stream) {
+    try {
+      const audioContext = await ensureAudioContext();
+      const source = audioContext.createMediaStreamSource(stream);
+      const analyser = audioContext.createAnalyser();
+      const gain = audioContext.createGain();
+      const destination = audioContext.createMediaStreamDestination();
+
+      analyser.fftSize = 1024;
+      analyser.smoothingTimeConstant = 0.55;
+      gain.gain.value = 1;
+
+      source.connect(analyser);
+      source.connect(gain);
+      gain.connect(destination);
+
+      state.remoteProcessors.set(peerId, {
+        source,
+        analyser,
+        gain,
+        destination,
+        frequencyData: new Uint8Array(analyser.frequencyBinCount),
+        proximityScore: 0,
+        currentGain: 1,
+        suppressionPercent: 0,
+      });
+
+      return destination.stream;
+    } catch {
+      return stream;
+    }
+  }
+
+  function disconnectRemoteProcessor(peerId) {
+    const processor = state.remoteProcessors.get(peerId);
+    if (!processor) {
+      return;
+    }
+
+    [processor.source, processor.analyser, processor.gain].forEach((node) => {
+      try {
+        node.disconnect();
+      } catch {
+        // Already disconnected.
+      }
+    });
+    processor.destination.stream.getTracks().forEach((track) => track.stop());
+    state.remoteProcessors.delete(peerId);
+    setParticipantSuppression(peerId, 0);
   }
 
   async function startScanner() {
@@ -1017,6 +1084,7 @@
       }
       state.localStream.addTrack(nextTrack);
       nextTrack.enabled = !state.muted;
+      await setupLocalAudioAnalysis();
       showToast("マイクを切り替えました。");
     } catch (error) {
       showToast(error.message || "マイクの切り替えに失敗しました。");
@@ -1096,6 +1164,24 @@
     renderParticipants();
   }
 
+  function setParticipantSuppression(peerId, suppressionPercent) {
+    if (!peerId || !state.participants.has(peerId)) {
+      return;
+    }
+
+    const participant = state.participants.get(peerId);
+    const nextSuppression = Math.max(0, Math.min(100, Math.round(suppressionPercent)));
+    const previousSuppression = participant.suppressionPercent || 0;
+
+    if (Math.abs(previousSuppression - nextSuppression) < 3 && nextSuppression !== 0 && nextSuppression !== 100) {
+      return;
+    }
+
+    participant.suppressionPercent = nextSuppression;
+    state.participants.set(peerId, participant);
+    renderParticipants();
+  }
+
   function touchParticipant(peerId, participantState = "接続中") {
     if (!peerId || peerId === state.peerId) {
       return;
@@ -1118,13 +1204,25 @@
     els.participantsList.innerHTML = "";
     [...state.participants.entries()].forEach(([peerId, participant]) => {
       const li = document.createElement("li");
+      const info = document.createElement("div");
       const id = document.createElement("span");
       const status = document.createElement("span");
+      const meter = document.createElement("span");
+      const suppression = participant.suppressionPercent || 0;
+
+      info.className = "participant-info";
       id.className = "participant-id";
       status.className = "participant-state";
+      meter.className = "participant-suppression";
+      li.classList.toggle("is-suppressed", suppression >= 10);
       id.textContent = participant.label || shortId(peerId);
-      status.textContent = participant.state || "接続中";
-      li.append(id, status);
+      status.textContent = suppression >= 10 ? `近接抑制 ${suppression}%` : participant.state || "接続中";
+      meter.style.setProperty("--suppression", `${suppression}%`);
+      info.append(id, status);
+      li.append(info);
+      if (suppression >= 10) {
+        li.append(meter);
+      }
       els.participantsList.append(li);
     });
   }
@@ -1302,6 +1400,186 @@
     renderParticipants();
   }
 
+  async function ensureAudioContext() {
+    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContextClass) {
+      throw new Error("このブラウザは音声処理に対応していません。");
+    }
+
+    if (!state.audioContext) {
+      state.audioContext = new AudioContextClass();
+    }
+
+    if (state.audioContext.state === "suspended") {
+      await state.audioContext.resume();
+    }
+
+    return state.audioContext;
+  }
+
+  async function setupLocalAudioAnalysis() {
+    if (!state.localStream) {
+      return;
+    }
+
+    try {
+      const audioContext = await ensureAudioContext();
+      disconnectLocalAudioAnalysis();
+
+      const source = audioContext.createMediaStreamSource(state.localStream);
+      const analyser = audioContext.createAnalyser();
+      analyser.fftSize = 1024;
+      analyser.smoothingTimeConstant = 0.55;
+      source.connect(analyser);
+
+      state.localAudioSource = source;
+      state.localAnalyser = analyser;
+      state.localFrequencyData = new Uint8Array(analyser.frequencyBinCount);
+      state.localFeatureHistory = [];
+    } catch {
+      state.localAnalyser = null;
+      state.localFrequencyData = null;
+    }
+  }
+
+  function disconnectLocalAudioAnalysis() {
+    if (state.localAudioSource) {
+      try {
+        state.localAudioSource.disconnect();
+      } catch {
+        // Already disconnected.
+      }
+    }
+    state.localAudioSource = null;
+    state.localAnalyser = null;
+    state.localFrequencyData = null;
+    state.localFeatureHistory = [];
+  }
+
+  function startProximityMonitor() {
+    stopProximityMonitor();
+    state.proximityTimer = window.setInterval(runProximityTick, PROXIMITY_INTERVAL_MS);
+  }
+
+  function stopProximityMonitor() {
+    if (state.proximityTimer) {
+      window.clearInterval(state.proximityTimer);
+      state.proximityTimer = null;
+    }
+  }
+
+  function runProximityTick() {
+    if (state.mode !== "room" || !state.localAnalyser || !state.audioContext || state.audioContext.state !== "running") {
+      return;
+    }
+
+    const now = performance.now();
+    const localFeature = readAudioFeature(state.localAnalyser, state.localFrequencyData);
+    state.localFeatureHistory.push({ ...localFeature, time: now });
+    state.localFeatureHistory = state.localFeatureHistory.filter((feature) => now - feature.time <= PROXIMITY_HISTORY_MS);
+
+    state.remoteProcessors.forEach((processor, peerId) => {
+      const remoteFeature = readAudioFeature(processor.analyser, processor.frequencyData);
+      const proximityScore = estimateProximityScore(remoteFeature, now);
+      updateRemoteSuppression(peerId, processor, proximityScore);
+    });
+  }
+
+  function readAudioFeature(analyser, frequencyData) {
+    analyser.getByteFrequencyData(frequencyData);
+
+    const sampleRate = state.audioContext?.sampleRate || 48000;
+    const nyquist = sampleRate / 2;
+    const bands = [
+      averageFrequencyRange(frequencyData, nyquist, 120, 250),
+      averageFrequencyRange(frequencyData, nyquist, 250, 500),
+      averageFrequencyRange(frequencyData, nyquist, 500, 1000),
+      averageFrequencyRange(frequencyData, nyquist, 1000, 2000),
+      averageFrequencyRange(frequencyData, nyquist, 2000, 3400),
+      averageFrequencyRange(frequencyData, nyquist, 3400, 5200),
+    ];
+    const voiceEnergy = bands.slice(0, 5).reduce((sum, value) => sum + value, 0) / 5;
+    const norm = Math.hypot(...bands) || 1;
+
+    return {
+      active: voiceEnergy > 0.045,
+      energy: voiceEnergy,
+      bands: bands.map((value) => value / norm),
+    };
+  }
+
+  function averageFrequencyRange(frequencyData, nyquist, minFrequency, maxFrequency) {
+    const start = Math.max(0, Math.floor((minFrequency / nyquist) * frequencyData.length));
+    const end = Math.min(frequencyData.length - 1, Math.ceil((maxFrequency / nyquist) * frequencyData.length));
+    let total = 0;
+    let count = 0;
+
+    for (let index = start; index <= end; index += 1) {
+      total += frequencyData[index] / 255;
+      count += 1;
+    }
+
+    return count > 0 ? total / count : 0;
+  }
+
+  function estimateProximityScore(remoteFeature, now) {
+    if (!remoteFeature.active) {
+      return 0;
+    }
+
+    let bestSimilarity = 0;
+    state.localFeatureHistory.forEach((localFeature) => {
+      const lag = now - localFeature.time;
+      if (!localFeature.active || lag < PROXIMITY_MIN_LAG_MS || lag > PROXIMITY_MAX_LAG_MS) {
+        return;
+      }
+
+      const similarity = cosineSimilarity(localFeature.bands, remoteFeature.bands);
+      if (similarity > bestSimilarity) {
+        bestSimilarity = similarity;
+      }
+    });
+
+    return clamp((bestSimilarity - 0.72) / 0.2, 0, 1);
+  }
+
+  function cosineSimilarity(left, right) {
+    let dot = 0;
+    let leftNorm = 0;
+    let rightNorm = 0;
+
+    for (let index = 0; index < left.length; index += 1) {
+      dot += left[index] * right[index];
+      leftNorm += left[index] * left[index];
+      rightNorm += right[index] * right[index];
+    }
+
+    return dot / ((Math.sqrt(leftNorm) * Math.sqrt(rightNorm)) || 1);
+  }
+
+  function updateRemoteSuppression(peerId, processor, proximityScore) {
+    const attack = proximityScore > processor.proximityScore ? 0.42 : 0.08;
+    processor.proximityScore += (proximityScore - processor.proximityScore) * attack;
+
+    const targetGain = processor.proximityScore > 0.18
+      ? 1 - processor.proximityScore * (1 - PROXIMITY_MIN_GAIN)
+      : 1;
+    const gainAttack = targetGain < processor.currentGain ? 0.36 : 0.08;
+    processor.currentGain += (targetGain - processor.currentGain) * gainAttack;
+    processor.currentGain = clamp(processor.currentGain, PROXIMITY_MIN_GAIN, 1);
+    processor.gain.gain.setTargetAtTime(processor.currentGain, state.audioContext.currentTime, 0.08);
+
+    const suppressionPercent = Math.round((1 - processor.currentGain) * 100);
+    if (Math.abs((processor.suppressionPercent || 0) - suppressionPercent) >= 3) {
+      processor.suppressionPercent = suppressionPercent;
+      setParticipantSuppression(peerId, suppressionPercent);
+    }
+  }
+
+  function clamp(value, min, max) {
+    return Math.min(max, Math.max(min, value));
+  }
+
   function broadcastHostMessage(message, exceptPeerId = "") {
     state.dataConnections.forEach((connection, peerId) => {
       if (peerId !== exceptPeerId) {
@@ -1344,7 +1622,9 @@
 
   function stopRoomResources() {
     stopPresenceMonitor();
+    stopProximityMonitor();
     releaseWakeLock();
+    disconnectLocalAudioAnalysis();
 
     state.dataConnections.forEach((connection) => connection.close());
     state.dataConnections.clear();
@@ -1357,11 +1637,13 @@
     state.mediaConnections.forEach((connection) => connection.close());
     state.mediaConnections.clear();
 
-    state.remoteAudios.forEach((audio) => {
-      audio.srcObject = null;
-      audio.remove();
-    });
-    state.remoteAudios.clear();
+    [...state.remoteAudios.keys()].forEach((peerId) => detachRemoteAudio(peerId));
+    state.remoteProcessors.clear();
+
+    if (state.audioContext) {
+      state.audioContext.close().catch(() => undefined);
+      state.audioContext = null;
+    }
 
     if (state.peer && !state.peer.destroyed) {
       state.peer.destroy();
@@ -1452,6 +1734,9 @@
   }
 
   async function unlockRemoteAudio() {
+    if (state.audioContext?.state === "suspended") {
+      await state.audioContext.resume().catch(() => undefined);
+    }
     const attempts = [...state.remoteAudios.values()].map((audio) => audio.play());
     const results = await Promise.allSettled(attempts);
     const failed = results.some((result) => result.status === "rejected");

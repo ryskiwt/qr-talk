@@ -351,6 +351,17 @@ main {
   color: var(--text);
 }
 
+#participantsList li.is-suppressed {
+  border: 1px solid rgba(227, 106, 98, 0.48);
+  background: #151012;
+}
+
+.participant-info {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
 .participant-id {
   min-width: 0;
   overflow: hidden;
@@ -362,6 +373,24 @@ main {
   flex: 0 0 auto;
   color: var(--muted);
   font-size: 0.78rem;
+}
+
+.participant-suppression {
+  position: relative;
+  flex: 0 0 86px;
+  height: 8px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: #2b1515;
+}
+
+.participant-suppression::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: var(--suppression);
+  border-radius: inherit;
+  background: var(--danger);
 }
 
 .remote-audio {
