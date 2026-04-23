@@ -46,7 +46,6 @@
     copyLinkButton: $("#copyLinkButton"),
     muteButton: $("#muteButton"),
     muteButtonText: $("#muteButtonText"),
-    muteSlash: $("#muteSlash"),
     pocketLockButton: $("#pocketLockButton"),
     leaveButton: $("#leaveButton"),
     audioInputSelect: $("#audioInputSelect"),
@@ -1139,7 +1138,6 @@
     els.muteButton.setAttribute("aria-pressed", String(state.muted));
     els.muteButton.setAttribute("aria-label", state.muted ? "ミュートを解除" : "ミュート");
     els.muteButtonText.textContent = state.muted ? "ミュート ON" : "ミュート OFF";
-    els.muteSlash.hidden = !state.muted;
   }
 
   function addParticipant(peerId, participantState) {

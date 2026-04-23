@@ -206,8 +206,13 @@ main {
   stroke-linejoin: round;
 }
 
-.mute-icon [hidden] {
-  display: none;
+.mute-slash {
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+
+.mute-button.is-muted .mute-slash {
+  opacity: 1;
 }
 
 .control-button-danger {
