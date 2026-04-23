@@ -35,6 +35,8 @@
   const VAD_NOISE_OFFSET = 0.012;
   const VAD_HANGOVER_TICKS = 1;
   const UNLOCK_HOLD_MS = 1200;
+  const HEADSET_ACTION_DEBOUNCE_MS = 550;
+  const HEADSET_MUTE_TOGGLE_ACTIONS = ["togglemicrophone", "hangup", "play", "pause", "stop"];
 
   const $ = (selector) => document.querySelector(selector);
 
@@ -107,6 +109,7 @@
     wakeLock: null,
     wakeWanted: false,
     unlockTimer: null,
+    lastHeadsetActionAt: 0,
   };
 
   document.addEventListener("DOMContentLoaded", init);
@@ -123,6 +126,7 @@
     }
     updateConnectionBadge("待機中");
     updateDeviceSupportUI();
+    setupMediaSessionControls();
   }
 
   function bindEvents() {
@@ -159,6 +163,78 @@
       navigator.mediaDevices.addEventListener("devicechange", () => {
         populateDevices().catch(() => undefined);
       });
+    }
+  }
+
+  function setupMediaSessionControls() {
+    if (!("mediaSession" in navigator)) {
+      return;
+    }
+
+    if ("MediaMetadata" in window) {
+      try {
+        navigator.mediaSession.metadata = new window.MediaMetadata({
+          title: "QR Talk",
+          artist: "音声トーク",
+        });
+      } catch {
+        // Metadata is only a hint for OS-level controls.
+      }
+    }
+
+    HEADSET_MUTE_TOGGLE_ACTIONS.forEach((action) => {
+      setMediaSessionActionHandler(action, (details) => {
+        handleHeadsetMuteAction(action, details).catch(handleFatalError);
+      });
+    });
+    updateMediaSessionState();
+  }
+
+  function setMediaSessionActionHandler(action, handler) {
+    try {
+      navigator.mediaSession.setActionHandler(action, handler);
+    } catch {
+      // Some browsers expose Media Session but not every action.
+    }
+  }
+
+  async function handleHeadsetMuteAction(action, details = {}) {
+    if (state.mode !== "room" || !state.localStream) {
+      return;
+    }
+
+    const now = performance.now();
+    if (now - state.lastHeadsetActionAt < HEADSET_ACTION_DEBOUNCE_MS) {
+      return;
+    }
+    state.lastHeadsetActionAt = now;
+
+    const changed = action === "togglemicrophone" && typeof details.isActivating === "boolean"
+      ? await setMuteState(!details.isActivating)
+      : await toggleMute();
+
+    if (changed) {
+      showToast(state.muted ? "イヤホン操作でミュートしました。" : "イヤホン操作でミュートを解除しました。");
+    }
+  }
+
+  function updateMediaSessionState() {
+    if (!("mediaSession" in navigator)) {
+      return;
+    }
+
+    try {
+      navigator.mediaSession.playbackState = state.mode === "room" ? "playing" : "none";
+    } catch {
+      // Playback state is optional browser integration.
+    }
+
+    if (typeof navigator.mediaSession.setMicrophoneActive === "function") {
+      try {
+        navigator.mediaSession.setMicrophoneActive(state.mode === "room" && !state.muted);
+      } catch {
+        // Microphone state reporting is not supported everywhere.
+      }
     }
   }
 
@@ -1046,6 +1122,7 @@
     if (name === "room") {
       els.roomView.classList.add("is-active");
     }
+    updateMediaSessionState();
   }
 
   function updateConnectionBadge(text) {
@@ -1182,17 +1259,41 @@
   }
 
   async function toggleMute() {
+    return setMuteState(!state.muted);
+  }
+
+  async function setMuteState(nextMuted) {
+    if (state.muted === nextMuted) {
+      updateMuteButton();
+      updateMediaSessionState();
+      return false;
+    }
+
     const previousMuted = state.muted;
-    state.muted = !state.muted;
+    state.muted = nextMuted;
     const activeConnectionCount = state.mediaConnections.size;
-    const replacedTrackCount = await syncOutgoingAudioTrack();
+    let replacedTrackCount = 0;
+
+    try {
+      replacedTrackCount = await syncOutgoingAudioTrack();
+    } catch (error) {
+      state.muted = previousMuted;
+      updateMuteButton();
+      updateMediaSessionState();
+      throw error;
+    }
 
     if (activeConnectionCount > 0 && replacedTrackCount === 0) {
       state.muted = previousMuted;
       showToast("このブラウザでは接続中のミュート切り替えに対応していません。");
+      updateMuteButton();
+      updateMediaSessionState();
+      return false;
     }
 
     updateMuteButton();
+    updateMediaSessionState();
+    return true;
   }
 
   function updateMuteButton() {
@@ -1848,8 +1949,10 @@
     state.peerId = null;
     state.suppressHostCloseNotice = false;
     state.muted = false;
+    state.lastHeadsetActionAt = 0;
     state.participants.clear();
     updateMuteButton();
+    updateMediaSessionState();
     els.audioUnlockButton.classList.add("hidden");
     disablePocketLock();
   }
