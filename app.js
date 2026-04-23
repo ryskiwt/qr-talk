@@ -18,11 +18,15 @@
   const SCAN_INTERVAL_MS = 180;
   const HEARTBEAT_INTERVAL_MS = 4000;
   const PARTICIPANT_TIMEOUT_MS = 14000;
-  const PROXIMITY_INTERVAL_MS = 120;
+  const PROXIMITY_INTERVAL_MS = 500;
   const PROXIMITY_HISTORY_MS = 1400;
+  const PROXIMITY_DECISION_INTERVAL_MS = 2000;
+  const PROXIMITY_DECISION_WINDOW_MS = 2000;
   const PROXIMITY_MIN_LAG_MS = 80;
   const PROXIMITY_MAX_LAG_MS = 900;
   const PROXIMITY_MIN_GAIN = 0.22;
+  const PROXIMITY_GAIN_LEVELS = [1, 0.72, 0.46, PROXIMITY_MIN_GAIN];
+  const PROXIMITY_SCORE_THRESHOLD = 0.45;
   const UNLOCK_HOLD_MS = 1200;
 
   const $ = (selector) => document.querySelector(selector);
@@ -83,6 +87,10 @@
     localAnalyser: null,
     localFrequencyData: null,
     localFeatureHistory: [],
+    silentAudioSource: null,
+    silentAudioGain: null,
+    silentAudioDestination: null,
+    silentAudioTrack: null,
     isLeaving: false,
     suppressHostCloseNotice: false,
     muted: false,
@@ -127,7 +135,7 @@
       showView("home");
     });
     els.leaveButton.addEventListener("click", () => leaveRoom("退出しました。").catch(handleFatalError));
-    els.muteButton.addEventListener("click", toggleMute);
+    els.muteButton.addEventListener("click", () => toggleMute().catch(handleFatalError));
     els.pocketLockButton.addEventListener("click", enablePocketLock);
     els.copyLinkButton.addEventListener("click", copyRoomLink);
     els.audioInputSelect.addEventListener("change", onInputDeviceChange);
@@ -234,6 +242,45 @@
     }
 
     return navigator.mediaDevices.getUserMedia({ audio, video: false });
+  }
+
+  async function getOutboundStream() {
+    return new MediaStream([await getOutboundAudioTrack()]);
+  }
+
+  async function getOutboundAudioTrack() {
+    if (state.muted) {
+      return getSilentAudioTrack();
+    }
+
+    const track = state.localStream?.getAudioTracks()[0];
+    if (!track) {
+      throw new Error("送信用のマイクが見つかりません。");
+    }
+    track.enabled = true;
+    return track;
+  }
+
+  async function getSilentAudioTrack() {
+    if (state.silentAudioTrack && state.silentAudioTrack.readyState === "live") {
+      return state.silentAudioTrack;
+    }
+
+    const audioContext = await ensureAudioContext();
+    const oscillator = audioContext.createOscillator();
+    const gain = audioContext.createGain();
+    const destination = audioContext.createMediaStreamDestination();
+
+    gain.gain.value = 0;
+    oscillator.connect(gain);
+    gain.connect(destination);
+    oscillator.start();
+
+    state.silentAudioSource = oscillator;
+    state.silentAudioGain = gain;
+    state.silentAudioDestination = destination;
+    state.silentAudioTrack = destination.stream.getAudioTracks()[0];
+    return state.silentAudioTrack;
   }
 
   function connectToHost() {
@@ -356,7 +403,7 @@
         .filter((peerId) => peerId !== state.peerId)
         .forEach((peerId) => {
           addParticipant(peerId, "接続中");
-          callPeer(peerId);
+          callPeer(peerId).catch(() => setParticipantState(peerId, "接続エラー"));
         });
       updateRoomStatus();
       renderParticipants();
@@ -390,16 +437,18 @@
 
     addParticipant(call.peer, "接続中");
     registerMediaConnection(call);
-    call.answer(state.localStream);
+    getOutboundStream()
+      .then((stream) => call.answer(stream))
+      .catch(() => call.answer(state.localStream));
     renderParticipants();
   }
 
-  function callPeer(peerId) {
+  async function callPeer(peerId) {
     if (!state.peer || !state.localStream || peerId === state.peerId || state.mediaConnections.has(peerId)) {
       return;
     }
 
-    const call = state.peer.call(peerId, state.localStream, {
+    const call = state.peer.call(peerId, await getOutboundStream(), {
       metadata: { roomId: state.roomId, peerId: state.peerId },
     });
     addParticipant(peerId, "接続中");
@@ -481,7 +530,10 @@
         source,
         analyser,
         frequencyData: new Uint8Array(analyser.frequencyBinCount),
-        proximityScore: 0,
+        proximityDecisions: [],
+        lastLevelDecisionAt: 0,
+        levelIndex: 0,
+        targetGain: 1,
         currentGain: 1,
         suppressionPercent: 0,
       });
@@ -1059,27 +1111,30 @@
       const nextStream = await getAudioStream();
       const nextTrack = nextStream.getAudioTracks()[0];
       const currentTrack = state.localStream.getAudioTracks()[0];
-      const activeConnectionCount = state.mediaConnections.size;
-      const replacedTrackCount = await replaceOutgoingAudioTrack(nextTrack);
-
-      if (activeConnectionCount > 0 && replacedTrackCount === 0) {
-        nextTrack.stop();
-        state.preferredInputId = previousInputId;
-        els.audioInputSelect.value = previousInputId;
-        throw new Error("このブラウザでは接続中のマイク切り替えに対応していません。入り直してください。");
-      }
-
       if (currentTrack) {
         state.localStream.removeTrack(currentTrack);
         currentTrack.stop();
       }
       state.localStream.addTrack(nextTrack);
-      nextTrack.enabled = !state.muted;
+      nextTrack.enabled = true;
       await setupLocalAudioAnalysis();
+
+      const activeConnectionCount = state.mediaConnections.size;
+      const replacedTrackCount = await syncOutgoingAudioTrack();
+      if (activeConnectionCount > 0 && replacedTrackCount === 0) {
+        state.preferredInputId = previousInputId;
+        els.audioInputSelect.value = previousInputId;
+        throw new Error("このブラウザでは接続中のマイク切り替えに対応していません。入り直してください。");
+      }
+
       showToast("マイクを切り替えました。");
     } catch (error) {
       showToast(error.message || "マイクの切り替えに失敗しました。");
     }
+  }
+
+  async function syncOutgoingAudioTrack() {
+    return replaceOutgoingAudioTrack(await getOutboundAudioTrack());
   }
 
   async function replaceOutgoingAudioTrack(track) {
@@ -1117,11 +1172,17 @@
     }
   }
 
-  function toggleMute() {
+  async function toggleMute() {
+    const previousMuted = state.muted;
     state.muted = !state.muted;
-    state.localStream?.getAudioTracks().forEach((track) => {
-      track.enabled = !state.muted;
-    });
+    const activeConnectionCount = state.mediaConnections.size;
+    const replacedTrackCount = await syncOutgoingAudioTrack();
+
+    if (activeConnectionCount > 0 && replacedTrackCount === 0) {
+      state.muted = previousMuted;
+      showToast("このブラウザでは接続中のミュート切り替えに対応していません。");
+    }
+
     updateMuteButton();
   }
 
@@ -1446,6 +1507,35 @@
     state.localFeatureHistory = [];
   }
 
+  function stopSilentAudioTrack() {
+    if (state.silentAudioSource) {
+      try {
+        state.silentAudioSource.stop();
+      } catch {
+        // Already stopped.
+      }
+      try {
+        state.silentAudioSource.disconnect();
+      } catch {
+        // Already disconnected.
+      }
+    }
+
+    if (state.silentAudioGain) {
+      try {
+        state.silentAudioGain.disconnect();
+      } catch {
+        // Already disconnected.
+      }
+    }
+
+    state.silentAudioDestination?.stream.getTracks().forEach((track) => track.stop());
+    state.silentAudioSource = null;
+    state.silentAudioGain = null;
+    state.silentAudioDestination = null;
+    state.silentAudioTrack = null;
+  }
+
   function startProximityMonitor() {
     stopProximityMonitor();
     state.proximityTimer = window.setInterval(runProximityTick, PROXIMITY_INTERVAL_MS);
@@ -1548,14 +1638,27 @@
   }
 
   function updateRemoteSuppression(peerId, processor, proximityScore) {
-    const attack = proximityScore > processor.proximityScore ? 0.42 : 0.08;
-    processor.proximityScore += (proximityScore - processor.proximityScore) * attack;
+    const now = performance.now();
+    processor.proximityDecisions.push({
+      time: now,
+      score: proximityScore,
+      detected: proximityScore >= PROXIMITY_SCORE_THRESHOLD,
+    });
+    processor.proximityDecisions = processor.proximityDecisions.filter(
+      (decision) => now - decision.time <= PROXIMITY_DECISION_WINDOW_MS,
+    );
 
-    const targetGain = processor.proximityScore > 0.18
-      ? 1 - processor.proximityScore * (1 - PROXIMITY_MIN_GAIN)
-      : 1;
-    const gainAttack = targetGain < processor.currentGain ? 0.36 : 0.08;
-    processor.currentGain += (targetGain - processor.currentGain) * gainAttack;
+    if (!processor.lastLevelDecisionAt || now - processor.lastLevelDecisionAt >= PROXIMITY_DECISION_INTERVAL_MS) {
+      processor.lastLevelDecisionAt = now;
+      updateSuppressionLevel(processor);
+    }
+
+    const gainStep = 0.16;
+    if (Math.abs(processor.currentGain - processor.targetGain) <= gainStep) {
+      processor.currentGain = processor.targetGain;
+    } else {
+      processor.currentGain += processor.currentGain < processor.targetGain ? gainStep : -gainStep;
+    }
     processor.currentGain = clamp(processor.currentGain, PROXIMITY_MIN_GAIN, 1);
 
     const audio = state.remoteAudios.get(peerId);
@@ -1568,6 +1671,28 @@
       processor.suppressionPercent = suppressionPercent;
       setParticipantSuppression(peerId, suppressionPercent);
     }
+  }
+
+  function updateSuppressionLevel(processor) {
+    const decisions = processor.proximityDecisions;
+    if (decisions.length === 0) {
+      processor.levelIndex = Math.max(0, processor.levelIndex - 1);
+      processor.targetGain = PROXIMITY_GAIN_LEVELS[processor.levelIndex];
+      return;
+    }
+
+    const detectedCount = decisions.filter((decision) => decision.detected).length;
+    const detectedRatio = detectedCount / decisions.length;
+    const averageScore = decisions.reduce((sum, decision) => sum + decision.score, 0) / decisions.length;
+    const seemsNear = detectedRatio >= 0.5 || averageScore >= 0.55;
+
+    if (seemsNear) {
+      processor.levelIndex = Math.min(PROXIMITY_GAIN_LEVELS.length - 1, processor.levelIndex + 1);
+    } else {
+      processor.levelIndex = Math.max(0, processor.levelIndex - 1);
+    }
+
+    processor.targetGain = PROXIMITY_GAIN_LEVELS[processor.levelIndex];
   }
 
   function clamp(value, min, max) {
@@ -1619,6 +1744,7 @@
     stopProximityMonitor();
     releaseWakeLock();
     disconnectLocalAudioAnalysis();
+    stopSilentAudioTrack();
 
     state.dataConnections.forEach((connection) => connection.close());
     state.dataConnections.clear();
