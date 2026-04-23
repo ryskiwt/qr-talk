@@ -25,6 +25,8 @@ PCでは`http://localhost:5173/`でマイク・カメラを使えます。スマ
 2. `Build and deployment`の`Source`で`GitHub Actions`を選びます。
 3. `main`ブランチへpushすると自動で公開されます。
 
+`Get Pages site failed`または`Not Found`で失敗する場合は、Pagesがまだ有効化されていない可能性があります。上記の`Source: GitHub Actions`を保存してから、Actionsを再実行してください。
+
 ## 補足
 
 - PeerJS Cloudはシグナリングだけに使い、音声はWebRTCのP2P接続で流れます。
