@@ -435,10 +435,12 @@
     const audio = document.createElement("audio");
     audio.autoplay = true;
     audio.playsInline = true;
-    audio.srcObject = await createRemotePlaybackStream(peerId, stream);
+    audio.srcObject = stream;
+    audio.volume = 1;
     audio.dataset.peerId = peerId;
     els.remoteAudioMount.append(audio);
     state.remoteAudios.set(peerId, audio);
+    await setupRemoteAudioAnalysis(peerId, stream);
     await applyOutputDevice(audio);
 
     try {
@@ -464,36 +466,27 @@
     state.remoteAudios.delete(peerId);
   }
 
-  async function createRemotePlaybackStream(peerId, stream) {
+  async function setupRemoteAudioAnalysis(peerId, stream) {
     try {
       const audioContext = await ensureAudioContext();
       const source = audioContext.createMediaStreamSource(stream);
       const analyser = audioContext.createAnalyser();
-      const gain = audioContext.createGain();
-      const destination = audioContext.createMediaStreamDestination();
 
       analyser.fftSize = 1024;
       analyser.smoothingTimeConstant = 0.55;
-      gain.gain.value = 1;
 
       source.connect(analyser);
-      source.connect(gain);
-      gain.connect(destination);
 
       state.remoteProcessors.set(peerId, {
         source,
         analyser,
-        gain,
-        destination,
         frequencyData: new Uint8Array(analyser.frequencyBinCount),
         proximityScore: 0,
         currentGain: 1,
         suppressionPercent: 0,
       });
-
-      return destination.stream;
     } catch {
-      return stream;
+      state.remoteProcessors.delete(peerId);
     }
   }
 
@@ -503,14 +496,13 @@
       return;
     }
 
-    [processor.source, processor.analyser, processor.gain].forEach((node) => {
+    [processor.source, processor.analyser].forEach((node) => {
       try {
         node.disconnect();
       } catch {
         // Already disconnected.
       }
     });
-    processor.destination.stream.getTracks().forEach((track) => track.stop());
     state.remoteProcessors.delete(peerId);
     setParticipantSuppression(peerId, 0);
   }
@@ -1565,7 +1557,11 @@
     const gainAttack = targetGain < processor.currentGain ? 0.36 : 0.08;
     processor.currentGain += (targetGain - processor.currentGain) * gainAttack;
     processor.currentGain = clamp(processor.currentGain, PROXIMITY_MIN_GAIN, 1);
-    processor.gain.gain.setTargetAtTime(processor.currentGain, state.audioContext.currentTime, 0.08);
+
+    const audio = state.remoteAudios.get(peerId);
+    if (audio) {
+      audio.volume = processor.currentGain;
+    }
 
     const suppressionPercent = Math.round((1 - processor.currentGain) * 100);
     if (Math.abs((processor.suppressionPercent || 0) - suppressionPercent) >= 3) {
