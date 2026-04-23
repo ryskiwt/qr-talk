@@ -1,0 +1,9 @@
+{
+  "name": "QR Talk",
+  "short_name": "QR Talk",
+  "start_url": ".",
+  "display": "standalone",
+  "background_color": "#080c10",
+  "theme_color": "#080c10",
+  "icons": []
+}
