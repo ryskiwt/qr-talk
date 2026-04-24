@@ -299,31 +299,6 @@ main {
   gap: 14px;
 }
 
-.name-panel {
-  padding: 14px;
-  display: grid;
-  gap: 8px;
-}
-
-.name-panel label {
-  color: var(--muted);
-  font-size: 0.86rem;
-}
-
-.name-panel input {
-  width: 100%;
-  min-height: 42px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  padding: 0 10px;
-  color: var(--text);
-  background: #0b1117;
-}
-
-.name-panel input::placeholder {
-  color: color-mix(in srgb, var(--muted) 82%, transparent);
-}
-
 .control-grid {
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
@@ -372,9 +347,7 @@ main {
 #participantsList li {
   min-height: 38px;
   padding: 8px 10px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
+  display: grid;
   gap: 12px;
   border-radius: 8px;
   background: #0b1117;
@@ -386,13 +359,23 @@ main {
   background: #151012;
 }
 
-.participant-info {
+.participant-row {
   min-width: 0;
-  display: grid;
-  gap: 3px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.participant-main {
+  min-width: 0;
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .participant-id {
+  flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -401,13 +384,45 @@ main {
 
 .participant-state {
   flex: 0 0 auto;
+  margin-left: auto;
+  text-align: right;
+  white-space: nowrap;
   color: var(--muted);
   font-size: 0.78rem;
 }
 
+.participant-edit-button {
+  flex: 0 0 auto;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: #111821;
+  color: var(--muted);
+}
+
+.participant-edit-button:hover {
+  color: var(--text);
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--line));
+}
+
+.participant-edit-button:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent) 80%, white);
+  outline-offset: 2px;
+}
+
+.participant-edit-button svg {
+  display: block;
+}
+
 .participant-suppression {
   position: relative;
-  flex: 0 0 86px;
+  justify-self: end;
+  width: 86px;
   height: 8px;
   border-radius: 999px;
   overflow: hidden;

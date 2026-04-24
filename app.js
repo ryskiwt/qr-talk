@@ -76,7 +76,6 @@
     muteButtonText: $("#muteButtonText"),
     pocketLockButton: $("#pocketLockButton"),
     leaveButton: $("#leaveButton"),
-    displayNameInput: $("#displayNameInput"),
     audioInputSelect: $("#audioInputSelect"),
     audioOutputSelect: $("#audioOutputSelect"),
     audioUnlockButton: $("#audioUnlockButton"),
@@ -141,7 +140,6 @@
   function init() {
     bindEvents();
     updateMuteButton();
-    updateDisplayNameInput();
     const roomId = extractRoomId(window.location.href);
     if (roomId) {
       state.pendingRoomId = roomId;
@@ -175,7 +173,6 @@
     els.muteButton.addEventListener("click", () => toggleMute().catch(handleFatalError));
     els.pocketLockButton.addEventListener("click", enablePocketLock);
     els.copyLinkButton.addEventListener("click", copyRoomLink);
-    els.displayNameInput.addEventListener("input", onDisplayNameInput);
     els.audioInputSelect.addEventListener("change", onInputDeviceChange);
     els.audioOutputSelect.addEventListener("change", onOutputDeviceChange);
     els.audioUnlockButton.addEventListener("click", unlockRemoteAudio);
@@ -299,7 +296,6 @@
         label: getLocalParticipantLabel(),
         state: "自分",
       });
-      updateDisplayNameInput();
 
       if (role === "host") {
         await ensureRoomServicePeer();
@@ -1616,27 +1612,51 @@
     els.participantsList.innerHTML = "";
     [...state.participants.entries()].forEach(([peerId, participant]) => {
       const li = document.createElement("li");
-      const info = document.createElement("div");
+      const row = document.createElement("div");
+      const main = document.createElement("div");
       const id = document.createElement("span");
       const status = document.createElement("span");
       const meter = document.createElement("span");
       const suppression = participant.suppressionPercent || 0;
+      const isSelf = peerId === state.peerId;
 
-      info.className = "participant-info";
+      row.className = "participant-row";
+      main.className = "participant-main";
       id.className = "participant-id";
       status.className = "participant-state";
       meter.className = "participant-suppression";
+      li.classList.toggle("is-self", isSelf);
       li.classList.toggle("is-suppressed", suppression >= 10);
       id.textContent = participant.label || shortId(peerId);
       status.textContent = suppression >= 10 ? `近接抑制 ${suppression}%` : participant.state || "接続中";
       meter.style.setProperty("--suppression", `${suppression}%`);
-      info.append(id, status);
-      li.append(info);
+      main.append(id);
+      if (isSelf) {
+        main.append(createDisplayNameEditButton());
+      }
+      row.append(main, status);
+      li.append(row);
       if (suppression >= 10) {
         li.append(meter);
       }
       els.participantsList.append(li);
     });
+  }
+
+  function createDisplayNameEditButton() {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "participant-edit-button";
+    button.setAttribute("aria-label", "表示名を変更");
+    button.title = "表示名を変更";
+    button.innerHTML = `
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" focusable="false" aria-hidden="true">
+        <path d="M12 20h9"></path>
+        <path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"></path>
+      </svg>
+    `;
+    button.addEventListener("click", promptForDisplayName);
+    return button;
   }
 
   function removeParticipant(peerId, { broadcast, playTone = true }) {
@@ -2019,24 +2039,25 @@
     });
   }
 
-  function onDisplayNameInput() {
-    if (!els.displayNameInput) {
+  function promptForDisplayName() {
+    const nextDisplayName = window.prompt(
+      "表示名を入力してください。空欄にするとID表示に戻ります。",
+      state.displayName,
+    );
+    if (nextDisplayName === null) {
       return;
     }
-
-    state.displayName = sanitizeDisplayName(els.displayNameInput.value);
-    updateLocalParticipantLabel();
-    syncDisplayName();
+    setDisplayName(nextDisplayName);
   }
 
-  function updateDisplayNameInput() {
-    if (!els.displayNameInput) {
+  function setDisplayName(nextDisplayName) {
+    const sanitized = sanitizeDisplayName(nextDisplayName);
+    if (sanitized === state.displayName) {
       return;
     }
-    if (els.displayNameInput.value !== state.displayName) {
-      els.displayNameInput.value = state.displayName;
-    }
-    els.displayNameInput.placeholder = shortId(state.peerId) || "自分";
+    state.displayName = sanitized;
+    updateLocalParticipantLabel();
+    syncDisplayName();
   }
 
   function updateLocalParticipantLabel() {
@@ -2585,7 +2606,6 @@
     state.participants.clear();
     updateMuteButton();
     updateMediaSessionState();
-    updateDisplayNameInput();
     els.audioUnlockButton.classList.add("hidden");
     disablePocketLock();
   }
