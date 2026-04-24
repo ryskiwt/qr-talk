@@ -136,6 +136,7 @@
     displayNameDraft: "",
     displayNameEditMode: false,
     displayNameFocusRequested: false,
+    suppressDisplayNameBlurCommit: false,
   };
 
   document.addEventListener("DOMContentLoaded", init);
@@ -1619,6 +1620,12 @@
         end: document.activeElement.selectionEnd ?? state.displayNameDraft.length,
       }
       : null;
+    const shouldPreserveDisplayNameEditor = state.displayNameEditMode
+      && (state.displayNameFocusRequested || activeDisplayNameInput);
+
+    if (shouldPreserveDisplayNameEditor) {
+      state.suppressDisplayNameBlurCommit = true;
+    }
 
     els.participantsList.innerHTML = "";
     [...state.participants.entries()].forEach(([peerId, participant]) => {
@@ -1666,10 +1673,16 @@
         window.requestAnimationFrame(() => {
           input.focus();
           input.setSelectionRange(selection.start, selection.end);
+          state.suppressDisplayNameBlurCommit = false;
         });
+      } else {
+        state.suppressDisplayNameBlurCommit = false;
       }
       state.displayNameFocusRequested = false;
+      return;
     }
+
+    state.suppressDisplayNameBlurCommit = false;
   }
 
   function createParticipantLabel(label) {
@@ -1690,7 +1703,7 @@
     input.placeholder = shortId(peerId) || "自分";
     input.value = state.displayNameDraft;
     input.addEventListener("input", onDisplayNameDraftInput);
-    input.addEventListener("blur", commitDisplayNameEdit);
+    input.addEventListener("blur", onDisplayNameInputBlur);
     input.addEventListener("keydown", onDisplayNameInputKeydown);
     return input;
   }
@@ -2116,6 +2129,9 @@
   }
 
   function onDisplayNameInputKeydown(event) {
+    if (event.isComposing) {
+      return;
+    }
     if (event.key === "Enter") {
       event.preventDefault();
       commitDisplayNameEdit();
@@ -2127,14 +2143,23 @@
     }
   }
 
+  function onDisplayNameInputBlur() {
+    if (state.suppressDisplayNameBlurCommit) {
+      return;
+    }
+    commitDisplayNameEdit();
+  }
+
   function commitDisplayNameEdit() {
     if (!state.displayNameEditMode) {
       return;
     }
-    setDisplayName(state.displayNameDraft);
     state.displayNameEditMode = false;
     state.displayNameFocusRequested = false;
-    renderParticipants();
+    state.suppressDisplayNameBlurCommit = false;
+    if (!setDisplayName(state.displayNameDraft)) {
+      renderParticipants();
+    }
   }
 
   function cancelDisplayNameEdit() {
@@ -2144,17 +2169,19 @@
     state.displayNameDraft = state.displayName;
     state.displayNameEditMode = false;
     state.displayNameFocusRequested = false;
+    state.suppressDisplayNameBlurCommit = false;
     renderParticipants();
   }
 
   function setDisplayName(nextDisplayName) {
     const sanitized = sanitizeDisplayName(nextDisplayName);
     if (sanitized === state.displayName) {
-      return;
+      return false;
     }
     state.displayName = sanitized;
     updateLocalParticipantLabel();
     syncDisplayName();
+    return true;
   }
 
   function updateLocalParticipantLabel() {
@@ -2711,6 +2738,7 @@
     state.displayNameDraft = "";
     state.displayNameEditMode = false;
     state.displayNameFocusRequested = false;
+    state.suppressDisplayNameBlurCommit = false;
     updateMuteButton();
     updateMediaSessionState();
     els.audioUnlockButton.classList.add("hidden");
