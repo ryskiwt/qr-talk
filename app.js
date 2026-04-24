@@ -20,6 +20,8 @@
   const PARTICIPANT_TIMEOUT_MS = 14000;
   const ROOM_SERVICE_RETRY_MS = 500;
   const ROOM_SERVICE_MAX_RETRIES = 12;
+  const ESTABLISHED_HOST_RECONNECT_MAX_RETRIES = 3;
+  const MEDIA_RECONNECT_RETRY_MS = 1200;
   const PROXIMITY_INTERVAL_MS = 500;
   const PROXIMITY_HISTORY_MS = 1400;
   const PROXIMITY_DECISION_INTERVAL_MS = 2000;
@@ -96,6 +98,7 @@
     peer: null,
     roomPeer: null,
     roomPeerPromise: null,
+    roomPeerRecoverTimer: null,
     localStream: null,
     scannerStream: null,
     scanTimer: null,
@@ -131,12 +134,14 @@
     lastHeadsetActionAt: 0,
     hostReconnectTimer: null,
     hostReconnectAttempts: 0,
+    peerReconnectTimer: null,
     roomEstablished: false,
     displayName: "",
     displayNameDraft: "",
     displayNameEditMode: false,
     displayNameFocusRequested: false,
     suppressDisplayNameBlurCommit: false,
+    mediaReconnectTimers: new Map(),
   };
 
   document.addEventListener("DOMContentLoaded", init);
@@ -347,23 +352,75 @@
 
   function bindParticipantPeerEvents(peer) {
     peer.on("call", (call) => handleIncomingCall(call));
-    peer.on("disconnected", () => updateConnectionBadge("シグナリング切断"));
-    peer.on("close", () => updateConnectionBadge("切断"));
+    peer.on("open", () => handleParticipantPeerOpen(peer));
+    peer.on("disconnected", () => handleParticipantPeerDisconnected(peer));
+    peer.on("close", () => handleParticipantPeerClosed(peer));
     peer.on("error", (error) => handlePeerError(error));
   }
 
   function bindRoomServicePeerEvents(peer) {
     peer.on("connection", (connection) => handleIncomingDataConnection(connection));
+    peer.on("open", () => {
+      if (state.roomPeer === peer) {
+        cancelRoomServicePeerRecover();
+      }
+    });
+    peer.on("disconnected", () => {
+      if (state.roomPeer === peer) {
+        scheduleRoomServicePeerRecover();
+      }
+    });
     peer.on("close", () => {
       if (state.roomPeer === peer) {
         state.roomPeer = null;
+        scheduleRoomServicePeerRecover();
       }
     });
     peer.on("error", () => {
-      if (state.roomPeer === peer && peer.destroyed) {
-        state.roomPeer = null;
+      if (state.roomPeer === peer) {
+        if (peer.destroyed) {
+          state.roomPeer = null;
+        }
+        scheduleRoomServicePeerRecover();
       }
     });
+  }
+
+  function handleParticipantPeerOpen(peer) {
+    if (state.peer !== peer) {
+      return;
+    }
+
+    cancelParticipantPeerReconnect();
+    if (state.mode !== "room" || state.isLeaving) {
+      return;
+    }
+
+    updateConnectionBadge("接続中");
+
+    if (state.role === "guest" && !state.hostConnection?.open) {
+      scheduleHostReconnect(0);
+    }
+
+    scheduleMissingMediaReconnects();
+  }
+
+  function handleParticipantPeerDisconnected(peer) {
+    if (state.peer !== peer) {
+      return;
+    }
+
+    updateConnectionBadge("シグナリング切断");
+    scheduleParticipantPeerReconnect();
+  }
+
+  function handleParticipantPeerClosed(peer) {
+    if (state.peer !== peer) {
+      return;
+    }
+
+    cancelParticipantPeerReconnect();
+    updateConnectionBadge("切断");
   }
 
   function waitForPeerOpen(peer) {
@@ -379,6 +436,7 @@
     }
 
     if (state.roomPeer && !state.roomPeer.destroyed && state.roomPeer.open) {
+      cancelRoomServicePeerRecover();
       return state.roomPeer;
     }
 
@@ -433,6 +491,39 @@
     state.roomPeer = null;
   }
 
+  function scheduleRoomServicePeerRecover(delayMs = ROOM_SERVICE_RETRY_MS) {
+    cancelRoomServicePeerRecover();
+    if (state.mode !== "room" || state.role !== "host" || !state.roomId || state.isLeaving) {
+      return;
+    }
+
+    state.roomPeerRecoverTimer = window.setTimeout(() => {
+      state.roomPeerRecoverTimer = null;
+      if (state.mode !== "room" || state.role !== "host" || !state.roomId || state.isLeaving) {
+        return;
+      }
+
+      ensureRoomServicePeer()
+        .then((peer) => {
+          if (!peer) {
+            return;
+          }
+          updateConnectionBadge("接続中");
+          broadcastRoster();
+        })
+        .catch(() => {
+          scheduleRoomServicePeerRecover();
+        });
+    }, delayMs);
+  }
+
+  function cancelRoomServicePeerRecover() {
+    if (state.roomPeerRecoverTimer) {
+      window.clearTimeout(state.roomPeerRecoverTimer);
+      state.roomPeerRecoverTimer = null;
+    }
+  }
+
   function scheduleHostReconnect(delayMs = ROOM_SERVICE_RETRY_MS) {
     cancelHostReconnect();
     if (state.mode !== "room" || state.role !== "guest") {
@@ -448,8 +539,20 @@
       state.hostReconnectAttempts += 1;
       connectToHost().catch((error) => {
         const exhausted = !state.roomEstablished && state.hostReconnectAttempts >= ROOM_SERVICE_MAX_RETRIES;
+        const shouldPromoteCoordinator = state.roomEstablished
+          && state.hostReconnectAttempts >= ESTABLISHED_HOST_RECONNECT_MAX_RETRIES;
         if (exhausted) {
           showToast("参加先のルームが見つかりません。");
+          return;
+        }
+
+        if (shouldPromoteCoordinator) {
+          const previousHostId = state.hostId;
+          if (previousHostId && previousHostId !== state.peerId) {
+            removeParticipant(previousHostId, { broadcast: false, playTone: false });
+          }
+          showToast("参加受付を引き継いでいます。");
+          electRoomCoordinator(previousHostId).catch(handleFatalError);
           return;
         }
 
@@ -470,6 +573,42 @@
     if (state.hostReconnectTimer) {
       window.clearTimeout(state.hostReconnectTimer);
       state.hostReconnectTimer = null;
+    }
+  }
+
+  function scheduleParticipantPeerReconnect(delayMs = ROOM_SERVICE_RETRY_MS) {
+    cancelParticipantPeerReconnect();
+    if (state.mode !== "room" || !state.peer || state.peer.destroyed || state.isLeaving) {
+      return;
+    }
+
+    state.peerReconnectTimer = window.setTimeout(() => {
+      state.peerReconnectTimer = null;
+      if (state.mode !== "room" || !state.peer || state.peer.destroyed || state.isLeaving) {
+        return;
+      }
+
+      if (!state.peer.disconnected) {
+        return;
+      }
+
+      try {
+        state.peer.reconnect();
+      } catch {
+        scheduleParticipantPeerReconnect();
+        return;
+      }
+
+      if (state.peer.disconnected) {
+        scheduleParticipantPeerReconnect();
+      }
+    }, delayMs);
+  }
+
+  function cancelParticipantPeerReconnect() {
+    if (state.peerReconnectTimer) {
+      window.clearTimeout(state.peerReconnectTimer);
+      state.peerReconnectTimer = null;
     }
   }
 
@@ -627,13 +766,7 @@
       return;
     }
 
-    const previousHostId = state.hostId;
-    if (previousHostId && previousHostId !== state.peerId) {
-      removeParticipant(previousHostId, { broadcast: false });
-    }
-
-    showToast("参加受付を引き継いでいます。");
-    electRoomCoordinator(previousHostId).catch(handleFatalError);
+    scheduleHostReconnect();
   }
 
   function handleIncomingDataConnection(connection) {
@@ -783,6 +916,7 @@
       return;
     }
 
+    cancelMediaReconnect(peerId);
     const call = state.peer.call(peerId, await getOutboundStream(), {
       metadata: { roomId: state.roomId, peerId: state.peerId },
     });
@@ -794,12 +928,15 @@
     const peerId = call.peer;
     const existing = state.mediaConnections.get(peerId);
     if (existing && existing !== call) {
+      existing.__skipReconnect = true;
       existing.close();
     }
 
+    cancelMediaReconnect(peerId);
     state.mediaConnections.set(peerId, call);
 
     call.on("stream", (stream) => {
+      cancelMediaReconnect(peerId);
       attachRemoteAudio(peerId, stream);
       setParticipantState(peerId, "接続済み");
     });
@@ -809,8 +946,20 @@
         detachRemoteAudio(peerId);
         setParticipantState(peerId, "未接続");
       }
+      if (!call.__skipReconnect) {
+        scheduleMediaReconnect(peerId);
+      }
     });
-    call.on("error", () => setParticipantState(peerId, "接続エラー"));
+    call.on("error", () => {
+      if (state.mediaConnections.get(peerId) === call) {
+        state.mediaConnections.delete(peerId);
+        detachRemoteAudio(peerId);
+        setParticipantState(peerId, "接続エラー");
+      }
+      if (!call.__skipReconnect) {
+        scheduleMediaReconnect(peerId);
+      }
+    });
   }
 
   async function attachRemoteAudio(peerId, stream) {
@@ -1735,6 +1884,7 @@
       return;
     }
 
+    cancelMediaReconnect(peerId);
     const hadParticipant = state.participants.delete(peerId);
     if (playTone && hadParticipant && state.mode === "room") {
       playParticipantTone("leave");
@@ -1809,12 +1959,72 @@
     } else {
       state.role = "guest";
       closeRoomServicePeer();
+      cancelRoomServicePeerRecover();
       state.hostReconnectAttempts = 0;
       scheduleHostReconnect(ROOM_SERVICE_RETRY_MS);
     }
 
     updateRoomStatus();
     renderParticipants();
+  }
+
+  function shouldInitiateMediaReconnect(peerId) {
+    if (!state.peerId || !peerId) {
+      return false;
+    }
+    return state.peerId.localeCompare(peerId) < 0;
+  }
+
+  function scheduleMediaReconnect(peerId, delayMs = MEDIA_RECONNECT_RETRY_MS) {
+    cancelMediaReconnect(peerId);
+    if (
+      state.mode !== "room"
+      || state.isLeaving
+      || !state.peer
+      || !state.localStream
+      || !state.participants.has(peerId)
+      || state.mediaConnections.has(peerId)
+      || !shouldInitiateMediaReconnect(peerId)
+    ) {
+      return;
+    }
+
+    const timer = window.setTimeout(() => {
+      state.mediaReconnectTimers.delete(peerId);
+      if (
+        state.mode !== "room"
+        || state.isLeaving
+        || !state.participants.has(peerId)
+        || state.mediaConnections.has(peerId)
+        || !shouldInitiateMediaReconnect(peerId)
+      ) {
+        return;
+      }
+
+      callPeer(peerId)
+        .then(() => undefined)
+        .catch(() => {
+          scheduleMediaReconnect(peerId);
+        });
+    }, delayMs);
+
+    state.mediaReconnectTimers.set(peerId, timer);
+  }
+
+  function cancelMediaReconnect(peerId) {
+    const timer = state.mediaReconnectTimers.get(peerId);
+    if (timer) {
+      window.clearTimeout(timer);
+      state.mediaReconnectTimers.delete(peerId);
+    }
+  }
+
+  function scheduleMissingMediaReconnects() {
+    [...state.participants.keys()].forEach((peerId) => {
+      if (peerId !== state.peerId && !state.mediaConnections.has(peerId)) {
+        scheduleMediaReconnect(peerId, 0);
+      }
+    });
   }
 
   function startPresenceMonitor() {
@@ -2692,6 +2902,8 @@
     stopLocationMonitor();
     releaseWakeLock();
     cancelHostReconnect();
+    cancelParticipantPeerReconnect();
+    cancelRoomServicePeerRecover();
     disconnectLocalAudioAnalysis();
     stopSilentAudioTrack();
 
@@ -2708,6 +2920,8 @@
 
     state.mediaConnections.forEach((connection) => connection.close());
     state.mediaConnections.clear();
+    state.mediaReconnectTimers.forEach((timer) => window.clearTimeout(timer));
+    state.mediaReconnectTimers.clear();
 
     [...state.remoteAudios.keys()].forEach((peerId) => detachRemoteAudio(peerId));
     state.remoteProcessors.clear();
