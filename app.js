@@ -133,6 +133,9 @@
     hostReconnectAttempts: 0,
     roomEstablished: false,
     displayName: "",
+    displayNameDraft: "",
+    displayNameEditMode: false,
+    displayNameFocusRequested: false,
   };
 
   document.addEventListener("DOMContentLoaded", init);
@@ -1609,12 +1612,19 @@
   }
 
   function renderParticipants() {
+    const activeDisplayNameInput = state.displayNameEditMode
+      && document.activeElement?.dataset.role === "display-name-input"
+      ? {
+        start: document.activeElement.selectionStart ?? state.displayNameDraft.length,
+        end: document.activeElement.selectionEnd ?? state.displayNameDraft.length,
+      }
+      : null;
+
     els.participantsList.innerHTML = "";
     [...state.participants.entries()].forEach(([peerId, participant]) => {
       const li = document.createElement("li");
       const row = document.createElement("div");
       const main = document.createElement("div");
-      const id = document.createElement("span");
       const status = document.createElement("span");
       const meter = document.createElement("span");
       const suppression = participant.suppressionPercent || 0;
@@ -1622,18 +1632,22 @@
 
       row.className = "participant-row";
       main.className = "participant-main";
-      id.className = "participant-id";
       status.className = "participant-state";
       meter.className = "participant-suppression";
       li.classList.toggle("is-self", isSelf);
       li.classList.toggle("is-suppressed", suppression >= 10);
-      id.textContent = participant.label || shortId(peerId);
       status.textContent = suppression >= 10 ? `近接抑制 ${suppression}%` : participant.state || "接続中";
       meter.style.setProperty("--suppression", `${suppression}%`);
-      main.append(id);
-      if (isSelf) {
-        main.append(createDisplayNameEditButton());
+
+      if (isSelf && state.displayNameEditMode) {
+        main.append(createDisplayNameEditInput(peerId), createDisplayNameEditButton({ editing: true }));
+      } else {
+        main.append(createParticipantLabel(participant.label || shortId(peerId)));
+        if (isSelf) {
+          main.append(createDisplayNameEditButton());
+        }
       }
+
       row.append(main, status);
       li.append(row);
       if (suppression >= 10) {
@@ -1641,21 +1655,65 @@
       }
       els.participantsList.append(li);
     });
+
+    if (state.displayNameEditMode && (state.displayNameFocusRequested || activeDisplayNameInput)) {
+      const selection = activeDisplayNameInput || {
+        start: state.displayNameDraft.length,
+        end: state.displayNameDraft.length,
+      };
+      const input = els.participantsList.querySelector('[data-role="display-name-input"]');
+      if (input) {
+        window.requestAnimationFrame(() => {
+          input.focus();
+          input.setSelectionRange(selection.start, selection.end);
+        });
+      }
+      state.displayNameFocusRequested = false;
+    }
   }
 
-  function createDisplayNameEditButton() {
+  function createParticipantLabel(label) {
+    const id = document.createElement("span");
+    id.className = "participant-id";
+    id.textContent = label;
+    return id;
+  }
+
+  function createDisplayNameEditInput(peerId) {
+    const input = document.createElement("input");
+    input.type = "text";
+    input.className = "participant-name-input";
+    input.dataset.role = "display-name-input";
+    input.maxLength = 32;
+    input.autocomplete = "nickname";
+    input.spellcheck = false;
+    input.placeholder = shortId(peerId) || "自分";
+    input.value = state.displayNameDraft;
+    input.addEventListener("input", onDisplayNameDraftInput);
+    input.addEventListener("blur", commitDisplayNameEdit);
+    input.addEventListener("keydown", onDisplayNameInputKeydown);
+    return input;
+  }
+
+  function createDisplayNameEditButton({ editing = false } = {}) {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "participant-edit-button";
-    button.setAttribute("aria-label", "表示名を変更");
-    button.title = "表示名を変更";
-    button.innerHTML = `
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" focusable="false" aria-hidden="true">
-        <path d="M12 20h9"></path>
-        <path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"></path>
-      </svg>
-    `;
-    button.addEventListener("click", promptForDisplayName);
+    button.setAttribute("aria-label", editing ? "表示名を確定" : "表示名を変更");
+    button.title = editing ? "表示名を確定" : "表示名を変更";
+    button.innerHTML = editing
+      ? `
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" focusable="false" aria-hidden="true">
+          <path d="M20 6 9 17l-5-5"></path>
+        </svg>
+      `
+      : `
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" focusable="false" aria-hidden="true">
+          <path d="M12 20h9"></path>
+          <path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"></path>
+        </svg>
+      `;
+    button.addEventListener("click", editing ? commitDisplayNameEdit : startDisplayNameEdit);
     return button;
   }
 
@@ -2039,15 +2097,54 @@
     });
   }
 
-  function promptForDisplayName() {
-    const nextDisplayName = window.prompt(
-      "表示名を入力してください。空欄にするとID表示に戻ります。",
-      state.displayName,
-    );
-    if (nextDisplayName === null) {
+  function startDisplayNameEdit() {
+    if (state.displayNameEditMode) {
       return;
     }
-    setDisplayName(nextDisplayName);
+    state.displayNameDraft = state.displayName;
+    state.displayNameEditMode = true;
+    state.displayNameFocusRequested = true;
+    renderParticipants();
+  }
+
+  function onDisplayNameDraftInput(event) {
+    const nextDraft = normalizeDisplayNameDraft(event.target.value);
+    state.displayNameDraft = nextDraft;
+    if (event.target.value !== nextDraft) {
+      event.target.value = nextDraft;
+    }
+  }
+
+  function onDisplayNameInputKeydown(event) {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      commitDisplayNameEdit();
+      return;
+    }
+    if (event.key === "Escape") {
+      event.preventDefault();
+      cancelDisplayNameEdit();
+    }
+  }
+
+  function commitDisplayNameEdit() {
+    if (!state.displayNameEditMode) {
+      return;
+    }
+    setDisplayName(state.displayNameDraft);
+    state.displayNameEditMode = false;
+    state.displayNameFocusRequested = false;
+    renderParticipants();
+  }
+
+  function cancelDisplayNameEdit() {
+    if (!state.displayNameEditMode) {
+      return;
+    }
+    state.displayNameDraft = state.displayName;
+    state.displayNameEditMode = false;
+    state.displayNameFocusRequested = false;
+    renderParticipants();
   }
 
   function setDisplayName(nextDisplayName) {
@@ -2102,6 +2199,13 @@
       return "";
     }
     return value.trim().slice(0, 32);
+  }
+
+  function normalizeDisplayNameDraft(value) {
+    if (typeof value !== "string") {
+      return "";
+    }
+    return value.slice(0, 32);
   }
 
   function maybeUpdateParticipantName(peerId, displayName) {
@@ -2604,6 +2708,9 @@
     state.locationNoticeShown = false;
     state.roomEstablished = false;
     state.participants.clear();
+    state.displayNameDraft = "";
+    state.displayNameEditMode = false;
+    state.displayNameFocusRequested = false;
     updateMuteButton();
     updateMediaSessionState();
     els.audioUnlockButton.classList.add("hidden");
