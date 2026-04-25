@@ -130,7 +130,21 @@
     <div class="pocket-overlay hidden" id="pocketOverlay" aria-live="polite">
       <div>
         <p>ポケットロック中</p>
-        <button id="unlockHoldButton" type="button">長押しで解除</button>
+        <div class="pocket-actions">
+          <button class="pocket-hold-button pocket-mute-button" id="pocketMuteHoldButton" type="button" aria-pressed="false">
+            <span class="mute-icon" aria-hidden="true">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" focusable="false">
+                <path d="M12 15c1.8 0 3-1.3 3-3.1V5c0-1.8-1.2-3-3-3S9 3.2 9 5v6.9c0 1.8 1.2 3.1 3 3.1z"></path>
+                <path d="M6 10.8c0 3.3 2.4 5.7 6 5.7s6-2.4 6-5.7"></path>
+                <path d="M12 16.5V21"></path>
+                <path d="M8.5 21h7"></path>
+                <path class="mute-slash" d="M4 4l16 16"></path>
+              </svg>
+            </span>
+            <span id="pocketMuteHoldText">長押しでミュート</span>
+          </button>
+          <button class="pocket-hold-button" id="unlockHoldButton" type="button">長押しで解除</button>
+        </div>
       </div>
     </div>
 

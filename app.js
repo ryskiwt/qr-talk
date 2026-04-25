@@ -84,6 +84,8 @@
     participantsList: $("#participantsList"),
     remoteAudioMount: $("#remoteAudioMount"),
     pocketOverlay: $("#pocketOverlay"),
+    pocketMuteHoldButton: $("#pocketMuteHoldButton"),
+    pocketMuteHoldText: $("#pocketMuteHoldText"),
     unlockHoldButton: $("#unlockHoldButton"),
     toast: $("#toast"),
   };
@@ -131,6 +133,7 @@
     wakeLock: null,
     wakeWanted: false,
     unlockTimer: null,
+    pocketMuteTimer: null,
     lastHeadsetActionAt: 0,
     hostReconnectTimer: null,
     hostReconnectAttempts: 0,
@@ -189,6 +192,11 @@
     els.unlockHoldButton.addEventListener("pointerdown", beginUnlockHold);
     els.unlockHoldButton.addEventListener("pointerup", cancelUnlockHold);
     els.unlockHoldButton.addEventListener("pointercancel", cancelUnlockHold);
+    els.unlockHoldButton.addEventListener("pointerleave", cancelUnlockHold);
+    els.pocketMuteHoldButton.addEventListener("pointerdown", beginPocketMuteHold);
+    els.pocketMuteHoldButton.addEventListener("pointerup", cancelPocketMuteHold);
+    els.pocketMuteHoldButton.addEventListener("pointercancel", cancelPocketMuteHold);
+    els.pocketMuteHoldButton.addEventListener("pointerleave", cancelPocketMuteHold);
     document.addEventListener("visibilitychange", onVisibilityChange);
     window.addEventListener("beforeunload", notifyLeaveBeforeUnload);
 
@@ -1574,6 +1582,8 @@
       els.leaveButton,
       els.muteButton,
       els.pocketLockButton,
+      els.pocketMuteHoldButton,
+      els.unlockHoldButton,
     ].forEach((button) => {
       button.disabled = isBusy;
     });
@@ -1735,6 +1745,10 @@
     els.muteButton.setAttribute("aria-pressed", String(state.muted));
     els.muteButton.setAttribute("aria-label", state.muted ? "ミュートを解除" : "ミュート");
     els.muteButtonText.textContent = state.muted ? "ミュート ON" : "ミュート OFF";
+    els.pocketMuteHoldButton.classList.toggle("is-muted", state.muted);
+    els.pocketMuteHoldButton.setAttribute("aria-pressed", String(state.muted));
+    els.pocketMuteHoldButton.setAttribute("aria-label", state.muted ? "長押しでミュートを解除" : "長押しでミュート");
+    els.pocketMuteHoldText.textContent = state.muted ? "長押しでミュート解除" : "長押しでミュート";
   }
 
   function addParticipant(peerId, participantState) {
@@ -3048,6 +3062,7 @@
   function disablePocketLock() {
     els.pocketOverlay.classList.add("hidden");
     cancelUnlockHold();
+    cancelPocketMuteHold();
   }
 
   function beginUnlockHold() {
@@ -3062,6 +3077,27 @@
     if (state.unlockTimer) {
       window.clearTimeout(state.unlockTimer);
       state.unlockTimer = null;
+    }
+  }
+
+  function beginPocketMuteHold() {
+    cancelPocketMuteHold();
+    state.pocketMuteTimer = window.setTimeout(() => {
+      state.pocketMuteTimer = null;
+      toggleMute()
+        .then((changed) => {
+          if (changed) {
+            showToast(state.muted ? "ミュートしました。" : "ミュートを解除しました。");
+          }
+        })
+        .catch(handleFatalError);
+    }, UNLOCK_HOLD_MS);
+  }
+
+  function cancelPocketMuteHold() {
+    if (state.pocketMuteTimer) {
+      window.clearTimeout(state.pocketMuteTimer);
+      state.pocketMuteTimer = null;
     }
   }
 

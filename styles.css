@@ -487,9 +487,12 @@ main {
   background: #000;
   color: #d8dee6;
   touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
 }
 
-.pocket-overlay div {
+.pocket-overlay > div {
   width: min(320px, calc(100vw - 40px));
   display: grid;
   gap: 14px;
@@ -501,14 +504,34 @@ main {
   color: var(--muted);
 }
 
-#unlockHoldButton {
+.pocket-actions {
+  width: 100%;
+  display: grid;
+  gap: 12px;
+}
+
+.pocket-hold-button {
   width: 100%;
   min-height: 72px;
+  padding: 14px;
   border-radius: 8px;
   border: 1px solid var(--line);
   background: #080c10;
   color: var(--text);
   font-weight: 700;
+}
+
+.pocket-mute-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+
+.pocket-mute-button.is-muted {
+  color: #ffe8e6;
+  background: var(--danger-dark);
+  border-color: #72302d;
 }
 
 .hidden {
