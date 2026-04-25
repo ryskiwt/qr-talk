@@ -615,7 +615,8 @@
 
     if (!state.roomEstablished) {
       if (attempt >= ROOM_SERVICE_MAX_RETRIES) {
-        showToast("参加先のルームが見つかりません。");
+        showToast("参加受付が見つからないため、この端末で受付を開始します。");
+        electRoomCoordinator(state.hostId).catch(handleFatalError);
         return true;
       }
 
@@ -890,7 +891,8 @@
 
     if (!state.roomEstablished) {
       if (state.hostReconnectAttempts >= ROOM_SERVICE_MAX_RETRIES) {
-        showToast("参加先のルームが見つかりません。");
+        showToast("参加受付が見つからないため、この端末で受付を開始します。");
+        electRoomCoordinator(state.hostId).catch(handleFatalError);
         return;
       }
       scheduleHostReconnect();
