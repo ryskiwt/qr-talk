@@ -20,7 +20,8 @@
   const PARTICIPANT_TIMEOUT_MS = 14000;
   const ROOM_SERVICE_RETRY_MS = 500;
   const ROOM_SERVICE_MAX_RETRIES = 12;
-  const ESTABLISHED_HOST_RECONNECT_MAX_RETRIES = 3;
+  const COORDINATOR_FAILOVER_MS = 12000;
+  const COORDINATOR_CANDIDATE_TIMEOUT_MS = 8000;
   const MEDIA_RECONNECT_RETRY_MS = 1200;
   const PROXIMITY_INTERVAL_MS = 500;
   const PROXIMITY_HISTORY_MS = 1400;
@@ -138,8 +139,13 @@
     hostReconnectTimer: null,
     hostReconnectAttempts: 0,
     hostReconnectFailureHandledAttempt: 0,
+    hostReconnectStartedAt: 0,
+    hostFailoverCandidateId: "",
+    hostFailoverCandidateStartedAt: 0,
+    failedHostIds: new Set(),
     peerReconnectTimer: null,
     roomEstablished: false,
+    roomGeneration: 0,
     displayName: "",
     displayNameDraft: "",
     displayNameEditMode: false,
@@ -310,6 +316,7 @@
       state.roomId = role === "host" ? generateRoomId() : roomId;
       state.hostId = role === "host" ? peerId : null;
       state.roomEstablished = role === "host";
+      state.roomGeneration = role === "host" ? 1 : 0;
       state.participants.set(peerId, {
         label: getLocalParticipantLabel(),
         state: "自分",
@@ -329,8 +336,7 @@
       await requestWakeLock();
 
       if (role === "guest") {
-        state.hostReconnectAttempts = 0;
-        state.hostReconnectFailureHandledAttempt = 0;
+        resetHostReconnectState();
         scheduleHostReconnect(0);
       } else {
         updateConnectionBadge("接続中");
@@ -521,9 +527,7 @@
           updateConnectionBadge("接続中");
           broadcastRoster();
         })
-        .catch(() => {
-          scheduleRoomServicePeerRecover();
-        });
+        .catch((error) => handleRoomServicePeerRecoverFailure(error));
     }, delayMs);
   }
 
@@ -532,6 +536,23 @@
       window.clearTimeout(state.roomPeerRecoverTimer);
       state.roomPeerRecoverTimer = null;
     }
+  }
+
+  function handleRoomServicePeerRecoverFailure() {
+    if (state.mode !== "room" || state.role !== "host" || !state.roomId || state.isLeaving) {
+      return;
+    }
+
+    if (state.roomEstablished && state.participants.size > 1) {
+      const nextHostId = pickNextRoomCoordinator(state.peerId);
+      if (nextHostId && nextHostId !== state.peerId) {
+        showToast("新しい参加受付に接続しています。");
+        relinquishRoomCoordinator(nextHostId, { connect: true });
+        return;
+      }
+    }
+
+    scheduleRoomServicePeerRecover();
   }
 
   function scheduleHostReconnect(delayMs = ROOM_SERVICE_RETRY_MS) {
@@ -558,6 +579,29 @@
     }
   }
 
+  function resetHostReconnectState() {
+    state.hostReconnectAttempts = 0;
+    state.hostReconnectFailureHandledAttempt = 0;
+    state.hostReconnectStartedAt = 0;
+    state.hostFailoverCandidateId = "";
+    state.hostFailoverCandidateStartedAt = 0;
+    state.failedHostIds.clear();
+  }
+
+  function startHostReconnectWindow(previousHostId = state.hostId) {
+    if (state.hostReconnectStartedAt) {
+      return;
+    }
+
+    state.hostReconnectStartedAt = Date.now();
+    state.hostFailoverCandidateId = "";
+    state.hostFailoverCandidateStartedAt = 0;
+    state.failedHostIds.clear();
+    if (isValidPeerId(previousHostId)) {
+      state.failedHostIds.add(previousHostId);
+    }
+  }
+
   function handleHostReconnectFailure(error) {
     if (state.mode !== "room" || state.role !== "guest" || state.isLeaving || state.hostReconnectAttempts < 1) {
       return false;
@@ -569,16 +613,45 @@
     }
     state.hostReconnectFailureHandledAttempt = attempt;
 
-    const exhausted = !state.roomEstablished && attempt >= ROOM_SERVICE_MAX_RETRIES;
-    const shouldPromoteCoordinator = state.roomEstablished
-      && attempt >= ESTABLISHED_HOST_RECONNECT_MAX_RETRIES;
+    if (!state.roomEstablished) {
+      if (attempt >= ROOM_SERVICE_MAX_RETRIES) {
+        showToast("参加先のルームが見つかりません。");
+        return true;
+      }
 
-    if (exhausted) {
-      showToast("参加先のルームが見つかりません。");
+      if (attempt === 1) {
+        const message = error?.type === "peer-unavailable"
+          ? "参加先のルームへ接続しています。"
+          : "ルームへの接続を再試行しています。";
+        showToast(message);
+      }
+      scheduleHostReconnect();
       return true;
     }
 
-    if (shouldPromoteCoordinator) {
+    startHostReconnectWindow(state.hostId);
+
+    if (attempt === 1) {
+      showToast("参加受付を確認しています。");
+    }
+
+    const elapsedMs = Date.now() - state.hostReconnectStartedAt;
+    if (elapsedMs >= COORDINATOR_FAILOVER_MS && handleCoordinatorFailoverCandidate()) {
+      return true;
+    }
+
+    scheduleHostReconnect();
+    return true;
+  }
+
+  function handleCoordinatorFailoverCandidate() {
+    const candidateId = getCoordinatorFailoverCandidate();
+    if (!candidateId) {
+      scheduleHostReconnect();
+      return true;
+    }
+
+    if (candidateId === state.peerId) {
       const previousHostId = state.hostId;
       if (previousHostId && previousHostId !== state.peerId) {
         removeParticipant(previousHostId, { broadcast: false, playTone: false });
@@ -588,16 +661,40 @@
       return true;
     }
 
-    if (attempt === 1) {
-      const message = state.roomEstablished
-        ? "参加受付の再接続を待っています。"
-        : error?.type === "peer-unavailable"
-          ? "参加先のルームへ接続しています。"
-          : "ルームへの接続を再試行しています。";
-      showToast(message);
+    if (state.hostId !== candidateId) {
+      state.hostId = candidateId;
+      showToast("新しい参加受付に接続しています。");
     }
+
+    if (Date.now() - state.hostFailoverCandidateStartedAt >= COORDINATOR_CANDIDATE_TIMEOUT_MS) {
+      state.failedHostIds.add(candidateId);
+      removeParticipant(candidateId, { broadcast: false, playTone: false });
+      state.hostFailoverCandidateId = "";
+      state.hostFailoverCandidateStartedAt = 0;
+      scheduleHostReconnect(0);
+      return true;
+    }
+
     scheduleHostReconnect();
     return true;
+  }
+
+  function getCoordinatorFailoverCandidate() {
+    const currentCandidateId = state.hostFailoverCandidateId;
+    if (
+      currentCandidateId
+      && (
+        currentCandidateId === state.peerId
+        || (state.participants.has(currentCandidateId) && !state.failedHostIds.has(currentCandidateId))
+      )
+    ) {
+      return currentCandidateId;
+    }
+
+    const candidateId = pickNextRoomCoordinator(state.failedHostIds);
+    state.hostFailoverCandidateId = candidateId;
+    state.hostFailoverCandidateStartedAt = Date.now();
+    return candidateId;
   }
 
   function isPendingHostReconnectError(error) {
@@ -743,18 +840,18 @@
 
       connection.on("open", () => {
         opened = true;
-        state.hostReconnectAttempts = 0;
-        state.hostReconnectFailureHandledAttempt = 0;
         sendData(connection, {
           type: "join",
           peerId: state.peerId,
           displayName: state.displayName,
+          hostId: state.hostId,
+          generation: state.roomGeneration,
         });
         shareLocalLocation();
         updateConnectionBadge("接続中");
         settleResolve();
       });
-      connection.on("data", (message) => handleHostMessage(message));
+      connection.on("data", (message) => handleHostMessage(message, connection));
       connection.on("close", () => {
         if (!opened) {
           if (state.hostConnection === connection) {
@@ -800,6 +897,7 @@
       return;
     }
 
+    startHostReconnectWindow(state.hostId);
     scheduleHostReconnect();
   }
 
@@ -817,6 +915,10 @@
         return;
       }
       if (message.type === "join") {
+        if (shouldRelinquishForJoiningPeer(message)) {
+          connection.close();
+          return;
+        }
         acceptParticipant(connection, message);
       }
       if (message.type === "leave") {
@@ -838,15 +940,40 @@
       }
     });
     connection.on("close", () => {
-      if (!state.isLeaving) {
+      if (!state.isLeaving && !connection.__skipParticipantRemove) {
         removeParticipant(remotePeerId, { broadcast: true });
       }
     });
     connection.on("error", () => {
-      if (!state.isLeaving) {
+      if (!state.isLeaving && !connection.__skipParticipantRemove) {
         removeParticipant(remotePeerId, { broadcast: true });
       }
     });
+  }
+
+  function shouldRelinquishForJoiningPeer(message = {}) {
+    if (state.role !== "host") {
+      return false;
+    }
+
+    const nextGeneration = getMessageGeneration(message);
+    const nextHostId = isValidPeerId(message.hostId) ? message.hostId : "";
+    if (!nextHostId || nextHostId === state.peerId) {
+      return false;
+    }
+
+    const newerGeneration = nextGeneration > state.roomGeneration;
+    const sameGenerationLosesTie = nextGeneration === state.roomGeneration
+      && nextHostId.localeCompare(state.peerId) < 0;
+
+    if (!newerGeneration && !sameGenerationLosesTie) {
+      return false;
+    }
+
+    state.roomGeneration = nextGeneration;
+    showToast("新しい参加受付に接続しています。");
+    relinquishRoomCoordinator(nextHostId, { connect: true });
+    return true;
   }
 
   function acceptParticipant(connection, message = {}) {
@@ -870,6 +997,7 @@
       type: "room-state",
       roomId: state.roomId,
       hostId: state.peerId,
+      generation: state.roomGeneration,
       peers: existingPeers,
       names: serializeParticipantNames(),
       locations: serializeParticipantLocations(),
@@ -880,19 +1008,73 @@
     renderParticipants();
   }
 
-  function handleHostMessage(message) {
+  function getMessageGeneration(message = {}) {
+    const generation = Number(message.generation);
+    return Number.isInteger(generation) && generation >= 0 ? generation : 0;
+  }
+
+  function shouldAcceptCoordinatorState(hostId, generation) {
+    if (!isValidPeerId(hostId)) {
+      return false;
+    }
+
+    if (generation > state.roomGeneration) {
+      return true;
+    }
+
+    if (generation < state.roomGeneration) {
+      return false;
+    }
+
+    if (!state.hostId || hostId === state.hostId) {
+      return true;
+    }
+
+    return hostId.localeCompare(state.hostId) < 0;
+  }
+
+  function applyCoordinatorState(message = {}) {
+    const nextHostId = isValidPeerId(message.hostId) ? message.hostId : "";
+    const nextGeneration = getMessageGeneration(message);
+    if (!shouldAcceptCoordinatorState(nextHostId, nextGeneration)) {
+      return false;
+    }
+
+    const wasHost = state.role === "host";
+    state.hostId = nextHostId;
+    state.roomGeneration = nextGeneration;
+    state.roomEstablished = true;
+    resetHostReconnectState();
+
+    if (wasHost && nextHostId !== state.peerId) {
+      relinquishRoomCoordinator(nextHostId, { connect: true });
+    }
+
+    return true;
+  }
+
+  function closeStaleHostConnection(connection) {
+    if (connection && state.hostConnection === connection) {
+      state.suppressHostCloseNotice = true;
+      connection.close();
+      state.hostConnection = null;
+      scheduleHostReconnect(0);
+    }
+  }
+
+  function handleHostMessage(message, connection = null) {
     if (!message || typeof message !== "object") {
       return;
     }
 
     if (message.type === "room-state") {
+      if (!applyCoordinatorState(message)) {
+        closeStaleHostConnection(connection);
+        return;
+      }
       if (isValidPeerId(message.roomId)) {
         state.roomId = message.roomId;
       }
-      state.hostId = isValidPeerId(message.hostId) ? message.hostId : state.hostId;
-      state.roomEstablished = true;
-      state.hostReconnectAttempts = 0;
-      state.hostReconnectFailureHandledAttempt = 0;
       cancelHostReconnect();
       const peerIds = Array.isArray(message.peers) ? message.peers : [];
       peerIds
@@ -907,6 +1089,15 @@
       updateRoomStatus();
       renderParticipants();
       renderRoomQr().catch(() => undefined);
+    }
+
+    if (
+      (message.type === "peer-joined" || message.type === "peer-left" || message.type === "room-closed")
+      && isValidPeerId(message.hostId)
+      && !applyCoordinatorState(message)
+    ) {
+      closeStaleHostConnection(connection);
+      return;
     }
 
     if (message.type === "peer-joined" && message.peerId !== state.peerId) {
@@ -1965,6 +2156,7 @@
   function handlePeerLeft(peerId) {
     const wasJoinTarget = peerId === state.hostId;
     if (wasJoinTarget) {
+      state.failedHostIds.add(peerId);
       state.suppressHostCloseNotice = true;
       if (state.hostConnection) {
         state.hostConnection.close();
@@ -1978,44 +2170,104 @@
     }
   }
 
+  function pickNextRoomCoordinator(excludedPeerIds = []) {
+    const excluded = excludedPeerIds instanceof Set
+      ? excludedPeerIds
+      : new Set(Array.isArray(excludedPeerIds) ? excludedPeerIds : [excludedPeerIds]);
+    const peerIds = new Set([...state.participants.keys(), state.peerId].filter(isValidPeerId));
+    return [...peerIds]
+      .filter((peerId) => !excluded.has(peerId))
+      .sort()[0] || state.peerId;
+  }
+
   async function electRoomCoordinator(excludedPeerId = "") {
     if (state.mode !== "room" || !state.peerId) {
       return;
     }
 
-    const nextHostId = [...state.participants.keys()]
-      .filter((peerId) => peerId !== excludedPeerId)
-      .sort()[0] || state.peerId;
+    const excludedPeerIds = new Set(state.failedHostIds);
+    if (isValidPeerId(excludedPeerId)) {
+      excludedPeerIds.add(excludedPeerId);
+    }
 
+    const nextHostId = pickNextRoomCoordinator(excludedPeerIds);
     state.hostId = nextHostId;
     state.roomEstablished = true;
     setRoomUrl(state.roomId);
     renderRoomQr().catch(() => undefined);
 
     if (nextHostId === state.peerId) {
-      state.role = "host";
-      cancelHostReconnect();
-      state.hostReconnectAttempts = 0;
-      state.hostReconnectFailureHandledAttempt = 0;
-      if (state.hostConnection) {
-        state.suppressHostCloseNotice = true;
-        state.hostConnection.close();
-        state.hostConnection = null;
-      }
-      await ensureRoomServicePeer();
-      updateConnectionBadge("接続中");
-      broadcastRoster();
+      await becomeRoomCoordinator();
     } else {
-      state.role = "guest";
-      closeRoomServicePeer();
-      cancelRoomServicePeerRecover();
-      state.hostReconnectAttempts = 0;
-      state.hostReconnectFailureHandledAttempt = 0;
-      scheduleHostReconnect(ROOM_SERVICE_RETRY_MS);
+      followRoomCoordinator(nextHostId);
     }
 
     updateRoomStatus();
     renderParticipants();
+  }
+
+  async function becomeRoomCoordinator() {
+    state.role = "host";
+    state.hostId = state.peerId;
+    state.roomEstablished = true;
+    state.roomGeneration = Math.max(1, state.roomGeneration + 1);
+    cancelHostReconnect();
+    resetHostReconnectState();
+
+    if (state.hostConnection) {
+      state.suppressHostCloseNotice = true;
+      state.hostConnection.close();
+      state.hostConnection = null;
+    }
+
+    try {
+      await ensureRoomServicePeer();
+      updateConnectionBadge("接続中");
+      broadcastRoster();
+    } catch {
+      showToast("参加受付の取得を待っています。");
+      scheduleRoomServicePeerRecover();
+    }
+  }
+
+  function followRoomCoordinator(nextHostId) {
+    if (!isValidPeerId(nextHostId)) {
+      return;
+    }
+
+    state.role = "guest";
+    state.hostId = nextHostId;
+    closeRoomServicePeer();
+    cancelRoomServicePeerRecover();
+    resetHostReconnectState();
+    showToast("新しい参加受付に接続しています。");
+    scheduleHostReconnect(ROOM_SERVICE_RETRY_MS);
+  }
+
+  function relinquishRoomCoordinator(nextHostId, { connect = false } = {}) {
+    if (isValidPeerId(nextHostId)) {
+      state.hostId = nextHostId;
+    }
+
+    if (state.role === "host") {
+      state.role = "guest";
+      closeRoomServicePeer();
+      cancelRoomServicePeerRecover();
+      closeCoordinatorDataConnections();
+    }
+
+    if (connect && state.mode === "room" && state.hostId !== state.peerId) {
+      cancelHostReconnect();
+      scheduleHostReconnect(0);
+    }
+  }
+
+  function closeCoordinatorDataConnections() {
+    state.dataConnections.forEach((connection) => {
+      connection.__skipParticipantRemove = true;
+      connection.close();
+    });
+    state.dataConnections.clear();
   }
 
   function shouldInitiateMediaReconnect(peerId) {
@@ -2132,6 +2384,7 @@
       type: "roster",
       roomId: state.roomId,
       hostId: state.peerId,
+      generation: state.roomGeneration,
       peers: [...state.participants.keys()],
       names: serializeParticipantNames(),
       locations: serializeParticipantLocations(),
@@ -2143,18 +2396,17 @@
       return;
     }
 
+    if (!applyCoordinatorState(message)) {
+      return;
+    }
+
     const rosterPeerIds = new Set(message.peers.filter(isValidPeerId));
     const now = Date.now();
-    state.roomEstablished = true;
 
     if (isValidPeerId(message.roomId)) {
       state.roomId = message.roomId;
       renderRoomQr().catch(() => undefined);
       setRoomUrl(message.roomId);
-    }
-
-    if (isValidPeerId(message.hostId)) {
-      state.hostId = message.hostId;
     }
 
     rosterPeerIds.forEach((peerId) => {
@@ -2907,9 +3159,15 @@
   }
 
   function broadcastHostMessage(message, exceptPeerId = "") {
+    const outgoingMessage = {
+      ...message,
+      roomId: state.roomId,
+      hostId: state.peerId,
+      generation: state.roomGeneration,
+    };
     state.dataConnections.forEach((connection, peerId) => {
       if (peerId !== exceptPeerId) {
-        sendData(connection, message);
+        sendData(connection, outgoingMessage);
       }
     });
   }
@@ -2995,10 +3253,10 @@
     state.suppressHostCloseNotice = false;
     state.muted = false;
     state.lastHeadsetActionAt = 0;
-    state.hostReconnectAttempts = 0;
-    state.hostReconnectFailureHandledAttempt = 0;
+    resetHostReconnectState();
     state.locationNoticeShown = false;
     state.roomEstablished = false;
+    state.roomGeneration = 0;
     state.participants.clear();
     state.displayNameDraft = "";
     state.displayNameEditMode = false;
