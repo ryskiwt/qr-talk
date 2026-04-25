@@ -665,6 +665,7 @@
     if (state.hostId !== candidateId) {
       state.hostId = candidateId;
       showToast("新しい参加受付に接続しています。");
+      renderParticipants();
     }
 
     if (Date.now() - state.hostFailoverCandidateStartedAt >= COORDINATOR_CANDIDATE_TIMEOUT_MS) {
@@ -2026,12 +2027,14 @@
       const meter = document.createElement("span");
       const suppression = participant.suppressionPercent || 0;
       const isSelf = peerId === state.peerId;
+      const isHost = peerId === state.hostId;
 
       row.className = "participant-row";
       main.className = "participant-main";
       status.className = "participant-state";
       meter.className = "participant-suppression";
       li.classList.toggle("is-self", isSelf);
+      li.classList.toggle("is-host", isHost);
       li.classList.toggle("is-suppressed", suppression >= 10);
       status.textContent = suppression >= 10 ? `近接抑制 ${suppression}%` : participant.state || "接続中";
       meter.style.setProperty("--suppression", `${suppression}%`);
@@ -2043,6 +2046,9 @@
         if (isSelf) {
           main.append(createDisplayNameEditButton());
         }
+      }
+      if (isHost) {
+        main.append(createParticipantHostBadge());
       }
 
       row.append(main, status);
@@ -2080,6 +2086,14 @@
     id.className = "participant-id";
     id.textContent = label;
     return id;
+  }
+
+  function createParticipantHostBadge() {
+    const badge = document.createElement("span");
+    badge.className = "participant-host-badge";
+    badge.title = "現在の参加受付担当";
+    badge.textContent = "ホスト";
+    return badge;
   }
 
   function createDisplayNameEditInput(peerId) {
