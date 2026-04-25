@@ -98,7 +98,7 @@
                       <path class="mute-slash" d="M4 4l16 16"></path>
                     </svg>
                   </span>
-                  <span id="muteButtonText">ミュート OFF</span>
+                  <span id="muteButtonText">マイク ON</span>
                 </button>
                 <button class="control-button mute-button" id="speakerMuteButton" type="button" aria-pressed="false">
                   <span class="mute-icon" aria-hidden="true">
@@ -140,7 +140,8 @@
 
     <div class="pocket-overlay hidden" id="pocketOverlay" aria-live="polite">
       <div>
-        <p>ポケットロック中</p>
+        <p class="pocket-title">ポケットロック中</p>
+        <p class="pocket-instruction">各ボタンは押し続けると実行されます。</p>
         <div class="pocket-actions">
           <button class="pocket-hold-button pocket-mute-button" id="pocketMuteHoldButton" type="button" aria-pressed="false">
             <span class="mute-icon" aria-hidden="true">
@@ -152,7 +153,7 @@
                 <path class="mute-slash" d="M4 4l16 16"></path>
               </svg>
             </span>
-            <span id="pocketMuteHoldText">長押しでミュート</span>
+            <span id="pocketMuteHoldText">マイク ON</span>
           </button>
           <button class="pocket-hold-button pocket-mute-button" id="pocketSpeakerMuteHoldButton" type="button" aria-pressed="false">
             <span class="mute-icon" aria-hidden="true">
@@ -163,9 +164,9 @@
                 <path class="mute-slash" d="M4 4l16 16"></path>
               </svg>
             </span>
-            <span id="pocketSpeakerMuteHoldText">長押しでスピーカーミュート</span>
+            <span id="pocketSpeakerMuteHoldText">スピーカー ON</span>
           </button>
-          <button class="pocket-hold-button" id="unlockHoldButton" type="button">長押しで解除</button>
+          <button class="pocket-hold-button" id="unlockHoldButton" type="button">ポケットロック解除</button>
         </div>
       </div>
     </div>

@@ -183,8 +183,11 @@ main {
 .mute-button.is-muted,
 .pocket-mute-button.is-muted {
   color: #ffe8e6;
-  background: var(--danger-dark);
   border-color: #72302d;
+}
+
+.mute-button.is-muted {
+  background: var(--danger-dark);
 }
 
 .mute-icon {
@@ -532,13 +535,26 @@ main {
 .pocket-overlay > div {
   width: min(320px, calc(100vw - 40px));
   display: grid;
-  gap: 14px;
+  gap: 10px;
   justify-items: center;
 }
 
 .pocket-overlay p {
   margin: 0;
   color: var(--muted);
+}
+
+.pocket-title {
+  color: var(--text);
+  font-size: 1.08rem;
+  font-weight: 700;
+}
+
+.pocket-instruction {
+  margin-bottom: 4px;
+  font-size: 0.86rem;
+  line-height: 1.5;
+  text-align: center;
 }
 
 .pocket-actions {
@@ -548,14 +564,20 @@ main {
 }
 
 .pocket-hold-button {
+  --pocket-button-bg: #080c10;
+  --pocket-hold-fill: color-mix(in srgb, var(--accent) 26%, transparent);
   width: 100%;
   min-height: 72px;
   padding: 14px;
   border-radius: 8px;
   border: 1px solid var(--line);
-  background: #080c10;
+  background:
+    linear-gradient(90deg, var(--pocket-hold-fill), var(--pocket-hold-fill)) 0 0 / 0 100% no-repeat,
+    var(--pocket-button-bg);
   color: var(--text);
   font-weight: 700;
+  touch-action: none;
+  -webkit-tap-highlight-color: transparent;
 }
 
 .pocket-mute-button {
@@ -563,6 +585,21 @@ main {
   align-items: center;
   justify-content: center;
   gap: 8px;
+}
+
+.pocket-hold-button.is-holding {
+  animation: pocket-hold-fill var(--pocket-hold-duration, 750ms) linear forwards;
+}
+
+.pocket-mute-button.is-muted {
+  --pocket-button-bg: var(--danger-dark);
+  --pocket-hold-fill: rgba(255, 232, 230, 0.16);
+}
+
+@keyframes pocket-hold-fill {
+  to {
+    background-size: 100% 100%, auto;
+  }
 }
 
 .hidden {

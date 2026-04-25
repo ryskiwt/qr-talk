@@ -47,7 +47,7 @@
   const LOCATION_STALE_MS = 45000;
   const LOCATION_MAX_ACCURACY_M = 80;
   const LOCATION_FAR_SKIP_DISTANCE_M = 35;
-  const UNLOCK_HOLD_MS = 1200;
+  const UNLOCK_HOLD_MS = 750;
   const HEADSET_ACTION_DEBOUNCE_MS = 550;
   const HEADSET_MUTE_TOGGLE_ACTIONS = ["togglemicrophone", "hangup", "play", "pause", "stop"];
   const PARTICIPANT_JOIN_TONE = [
@@ -219,6 +219,7 @@
     els.pocketSpeakerMuteHoldButton.addEventListener("pointerup", cancelPocketSpeakerMuteHold);
     els.pocketSpeakerMuteHoldButton.addEventListener("pointercancel", cancelPocketSpeakerMuteHold);
     els.pocketSpeakerMuteHoldButton.addEventListener("pointerleave", cancelPocketSpeakerMuteHold);
+    els.pocketOverlay.addEventListener("contextmenu", (event) => event.preventDefault());
     document.addEventListener("visibilitychange", onVisibilityChange);
     window.addEventListener("beforeunload", notifyLeaveBeforeUnload);
 
@@ -277,7 +278,7 @@
       : await toggleMute();
 
     if (changed) {
-      showToast(state.muted ? "イヤホン操作でミュートしました。" : "イヤホン操作でミュートを解除しました。");
+      showToast(state.muted ? "マイクをOFFにしました。" : "マイクをONにしました。");
     }
   }
 
@@ -1961,7 +1962,7 @@
 
     if (activeConnectionCount > 0 && replacedTrackCount === 0) {
       state.muted = previousMuted;
-      showToast("このブラウザでは接続中のミュート切り替えに対応していません。");
+      showToast("このブラウザでは接続中のマイクON/OFF切り替えに対応していません。");
       updateMuteButton();
       updateMediaSessionState();
       return false;
@@ -1979,28 +1980,29 @@
   function updateMuteButton() {
     els.muteButton.classList.toggle("is-muted", state.muted);
     els.muteButton.setAttribute("aria-pressed", String(state.muted));
-    els.muteButton.setAttribute("aria-label", state.muted ? "ミュートを解除" : "ミュート");
-    els.muteButtonText.textContent = state.muted ? "ミュート ON" : "ミュート OFF";
+    els.muteButton.setAttribute("aria-label", state.muted ? "マイクをONにする" : "マイクをOFFにする");
+    els.muteButtonText.textContent = state.muted ? "マイク OFF" : "マイク ON";
     els.pocketMuteHoldButton.classList.toggle("is-muted", state.muted);
     els.pocketMuteHoldButton.setAttribute("aria-pressed", String(state.muted));
-    els.pocketMuteHoldButton.setAttribute("aria-label", state.muted ? "長押しでミュートを解除" : "長押しでミュート");
-    els.pocketMuteHoldText.textContent = state.muted ? "長押しでミュート解除" : "長押しでミュート";
+    els.pocketMuteHoldButton.setAttribute("aria-label", state.muted ? "マイクをONにする" : "マイクをOFFにする");
+    els.pocketMuteHoldText.textContent = state.muted ? "マイク OFF" : "マイク ON";
   }
 
   function updateSpeakerMuteButton() {
     els.speakerMuteButton.classList.toggle("is-muted", state.speakerMuted);
     els.speakerMuteButton.setAttribute("aria-pressed", String(state.speakerMuted));
-    els.speakerMuteButton.setAttribute("aria-label", state.speakerMuted ? "スピーカーミュートを解除" : "スピーカーミュート");
+    els.speakerMuteButton.setAttribute(
+      "aria-label",
+      state.speakerMuted ? "スピーカーをONにする" : "スピーカーをOFFにする",
+    );
     els.speakerMuteButtonText.textContent = state.speakerMuted ? "スピーカー OFF" : "スピーカー ON";
     els.pocketSpeakerMuteHoldButton.classList.toggle("is-muted", state.speakerMuted);
     els.pocketSpeakerMuteHoldButton.setAttribute("aria-pressed", String(state.speakerMuted));
     els.pocketSpeakerMuteHoldButton.setAttribute(
       "aria-label",
-      state.speakerMuted ? "長押しでスピーカーミュートを解除" : "長押しでスピーカーミュート",
+      state.speakerMuted ? "スピーカーをONにする" : "スピーカーをOFFにする",
     );
-    els.pocketSpeakerMuteHoldText.textContent = state.speakerMuted
-      ? "長押しでスピーカー解除"
-      : "長押しでスピーカーミュート";
+    els.pocketSpeakerMuteHoldText.textContent = state.speakerMuted ? "スピーカー OFF" : "スピーカー ON";
   }
 
   function addParticipant(peerId, participantState) {
@@ -3524,6 +3526,9 @@
   }
 
   function enablePocketLock() {
+    [els.unlockHoldButton, els.pocketMuteHoldButton, els.pocketSpeakerMuteHoldButton].forEach((button) => {
+      button.style.setProperty("--pocket-hold-duration", `${UNLOCK_HOLD_MS}ms`);
+    });
     els.pocketOverlay.classList.remove("hidden");
     requestWakeLock().catch(() => undefined);
   }
@@ -3535,57 +3540,98 @@
     cancelPocketSpeakerMuteHold();
   }
 
-  function beginUnlockHold() {
+  function beginUnlockHold(event) {
+    event?.preventDefault();
     cancelUnlockHold();
+    beginPocketHold(els.unlockHoldButton);
     state.unlockTimer = window.setTimeout(() => {
+      completePocketHold(els.unlockHoldButton);
       disablePocketLock();
+      notifyPocketAction();
       showToast("ポケットロックを解除しました。");
     }, UNLOCK_HOLD_MS);
   }
 
-  function cancelUnlockHold() {
+  function cancelUnlockHold(event) {
+    event?.preventDefault();
+    cancelPocketHold(els.unlockHoldButton);
     if (state.unlockTimer) {
       window.clearTimeout(state.unlockTimer);
       state.unlockTimer = null;
     }
   }
 
-  function beginPocketMuteHold() {
+  function beginPocketMuteHold(event) {
+    event?.preventDefault();
     cancelPocketMuteHold();
+    beginPocketHold(els.pocketMuteHoldButton);
     state.pocketMuteTimer = window.setTimeout(() => {
       state.pocketMuteTimer = null;
       toggleMute()
         .then((changed) => {
+          completePocketHold(els.pocketMuteHoldButton);
           if (changed) {
-            showToast(state.muted ? "ミュートしました。" : "ミュートを解除しました。");
+            notifyPocketAction();
+            showToast(state.muted ? "マイクをOFFにしました。" : "マイクをONにしました。");
           }
         })
-        .catch(handleFatalError);
+        .catch((error) => {
+          completePocketHold(els.pocketMuteHoldButton);
+          handleFatalError(error);
+        });
     }, UNLOCK_HOLD_MS);
   }
 
-  function cancelPocketMuteHold() {
+  function cancelPocketMuteHold(event) {
+    event?.preventDefault();
+    cancelPocketHold(els.pocketMuteHoldButton);
     if (state.pocketMuteTimer) {
       window.clearTimeout(state.pocketMuteTimer);
       state.pocketMuteTimer = null;
     }
   }
 
-  function beginPocketSpeakerMuteHold() {
+  function beginPocketSpeakerMuteHold(event) {
+    event?.preventDefault();
     cancelPocketSpeakerMuteHold();
+    beginPocketHold(els.pocketSpeakerMuteHoldButton);
     state.pocketSpeakerMuteTimer = window.setTimeout(() => {
       state.pocketSpeakerMuteTimer = null;
       const changed = toggleSpeakerMute();
+      completePocketHold(els.pocketSpeakerMuteHoldButton);
       if (changed) {
-        showToast(state.speakerMuted ? "スピーカーミュートしました。" : "スピーカーミュートを解除しました。");
+        notifyPocketAction();
+        showToast(state.speakerMuted ? "スピーカーをOFFにしました。" : "スピーカーをONにしました。");
       }
     }, UNLOCK_HOLD_MS);
   }
 
-  function cancelPocketSpeakerMuteHold() {
+  function cancelPocketSpeakerMuteHold(event) {
+    event?.preventDefault();
+    cancelPocketHold(els.pocketSpeakerMuteHoldButton);
     if (state.pocketSpeakerMuteTimer) {
       window.clearTimeout(state.pocketSpeakerMuteTimer);
       state.pocketSpeakerMuteTimer = null;
+    }
+  }
+
+  function beginPocketHold(button) {
+    button.classList.remove("is-holding");
+    void button.offsetWidth;
+    button.classList.add("is-holding");
+  }
+
+  function cancelPocketHold(button) {
+    button.classList.remove("is-holding");
+  }
+
+  function completePocketHold(button) {
+    button.classList.remove("is-holding");
+  }
+
+  function notifyPocketAction() {
+    if (navigator.vibrate) {
+      navigator.vibrate(18);
     }
   }
 
