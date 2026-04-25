@@ -58,6 +58,10 @@ select:disabled {
   gap: 20px;
 }
 
+body.is-pocket-locked .app-shell {
+  visibility: hidden;
+}
+
 .app-header,
 .room-topline,
 .scanner-header {

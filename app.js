@@ -156,6 +156,9 @@
     peerReconnectTimer: null,
     roomEstablished: false,
     roomGeneration: 0,
+    pocketLocked: false,
+    participantsRenderPending: false,
+    pendingRoomStatus: "",
     displayName: "",
     displayNameDraft: "",
     displayNameEditMode: false,
@@ -1748,8 +1751,14 @@
     updateRoomStatus();
   }
 
-  function setRoomStatus(status) {
+  function setRoomStatus(status, { force = false } = {}) {
+    if (state.pocketLocked && !force) {
+      state.pendingRoomStatus = status;
+      return;
+    }
+
     els.roomTitle.textContent = status;
+    state.pendingRoomStatus = "";
   }
 
   function updateRoomStatus() {
@@ -2095,7 +2104,7 @@
     renderParticipants();
   }
 
-  function clearParticipantSpeakingStates() {
+  function clearParticipantSpeakingStates({ render = true } = {}) {
     let changed = false;
 
     state.participants.forEach((participant) => {
@@ -2106,9 +2115,10 @@
       }
     });
 
-    if (changed) {
+    if (changed && render) {
       renderParticipants();
     }
+    return changed;
   }
 
   function touchParticipant(peerId, participantState = "接続中") {
@@ -2130,6 +2140,12 @@
   }
 
   function renderParticipants() {
+    if (state.pocketLocked) {
+      state.participantsRenderPending = true;
+      return;
+    }
+
+    state.participantsRenderPending = false;
     const activeDisplayNameInput = state.displayNameEditMode
       && document.activeElement?.dataset.role === "display-name-input"
       ? {
@@ -3130,8 +3146,11 @@
     }
 
     const now = performance.now();
+    const shouldUpdateSpeakingIndicators = !state.pocketLocked;
     const localFeature = readAudioFeature(state.localAnalyser, state.localFrequencyData, state.localVad);
-    updateParticipantSpeakingFromFeature(state.peerId, state.muted ? null : localFeature, now);
+    if (shouldUpdateSpeakingIndicators) {
+      updateParticipantSpeakingFromFeature(state.peerId, state.muted ? null : localFeature, now);
+    }
     if (localFeature.active) {
       state.localFeatureHistory.push({ ...localFeature, time: now });
     }
@@ -3139,7 +3158,9 @@
 
     state.remoteProcessors.forEach((processor, peerId) => {
       const remoteFeature = readAudioFeature(processor.analyser, processor.frequencyData, processor.vad);
-      updateParticipantSpeakingFromFeature(peerId, remoteFeature, now);
+      if (shouldUpdateSpeakingIndicators) {
+        updateParticipantSpeakingFromFeature(peerId, remoteFeature, now);
+      }
 
       const locationGate = evaluateLocationGate(peerId);
       if (locationGate.skip) {
@@ -3529,15 +3550,34 @@
     [els.unlockHoldButton, els.pocketMuteHoldButton, els.pocketSpeakerMuteHoldButton].forEach((button) => {
       button.style.setProperty("--pocket-hold-duration", `${UNLOCK_HOLD_MS}ms`);
     });
+    state.pocketLocked = true;
+    document.body.classList.add("is-pocket-locked");
     els.pocketOverlay.classList.remove("hidden");
     requestWakeLock().catch(() => undefined);
   }
 
   function disablePocketLock() {
     els.pocketOverlay.classList.add("hidden");
+    state.pocketLocked = false;
+    document.body.classList.remove("is-pocket-locked");
     cancelUnlockHold();
     cancelPocketMuteHold();
     cancelPocketSpeakerMuteHold();
+    flushPocketDeferredUpdates();
+  }
+
+  function flushPocketDeferredUpdates() {
+    const speakingChanged = clearParticipantSpeakingStates({ render: false });
+
+    if (state.pendingRoomStatus) {
+      setRoomStatus(state.pendingRoomStatus, { force: true });
+    } else {
+      updateRoomStatus();
+    }
+
+    if (state.participantsRenderPending || speakingChanged) {
+      renderParticipants();
+    }
   }
 
   function beginUnlockHold(event) {
@@ -3572,7 +3612,7 @@
           completePocketHold(els.pocketMuteHoldButton);
           if (changed) {
             notifyPocketAction();
-            showToast(state.muted ? "マイクをOFFにしました。" : "マイクをONにしました。");
+            showToast(state.muted ? "マイクをOFFにしました。" : "マイクをONにしました。", { force: true });
           }
         })
         .catch((error) => {
@@ -3601,7 +3641,7 @@
       completePocketHold(els.pocketSpeakerMuteHoldButton);
       if (changed) {
         notifyPocketAction();
-        showToast(state.speakerMuted ? "スピーカーをOFFにしました。" : "スピーカーをONにしました。");
+        showToast(state.speakerMuted ? "スピーカーをOFFにしました。" : "スピーカーをONにしました。", { force: true });
       }
     }, UNLOCK_HOLD_MS);
   }
@@ -3695,7 +3735,11 @@
     }
   }
 
-  function showToast(message) {
+  function showToast(message, { force = false } = {}) {
+    if (state.pocketLocked && !force) {
+      return;
+    }
+
     els.toast.textContent = message;
     els.toast.classList.remove("hidden");
     window.clearTimeout(showToast.timer);
