@@ -134,6 +134,7 @@
     lastHeadsetActionAt: 0,
     hostReconnectTimer: null,
     hostReconnectAttempts: 0,
+    hostReconnectFailureHandledAttempt: 0,
     peerReconnectTimer: null,
     roomEstablished: false,
     displayName: "",
@@ -321,6 +322,7 @@
 
       if (role === "guest") {
         state.hostReconnectAttempts = 0;
+        state.hostReconnectFailureHandledAttempt = 0;
         scheduleHostReconnect(0);
       } else {
         updateConnectionBadge("接続中");
@@ -537,35 +539,7 @@
       }
 
       state.hostReconnectAttempts += 1;
-      connectToHost().catch((error) => {
-        const exhausted = !state.roomEstablished && state.hostReconnectAttempts >= ROOM_SERVICE_MAX_RETRIES;
-        const shouldPromoteCoordinator = state.roomEstablished
-          && state.hostReconnectAttempts >= ESTABLISHED_HOST_RECONNECT_MAX_RETRIES;
-        if (exhausted) {
-          showToast("参加先のルームが見つかりません。");
-          return;
-        }
-
-        if (shouldPromoteCoordinator) {
-          const previousHostId = state.hostId;
-          if (previousHostId && previousHostId !== state.peerId) {
-            removeParticipant(previousHostId, { broadcast: false, playTone: false });
-          }
-          showToast("参加受付を引き継いでいます。");
-          electRoomCoordinator(previousHostId).catch(handleFatalError);
-          return;
-        }
-
-        if (state.hostReconnectAttempts === 1) {
-          const message = state.roomEstablished
-            ? "参加受付の再接続を待っています。"
-            : error?.type === "peer-unavailable"
-              ? "参加先のルームへ接続しています。"
-              : "ルームへの接続を再試行しています。";
-          showToast(message);
-        }
-        scheduleHostReconnect();
-      });
+      connectToHost().catch((error) => handleHostReconnectFailure(error));
     }, delayMs);
   }
 
@@ -574,6 +548,57 @@
       window.clearTimeout(state.hostReconnectTimer);
       state.hostReconnectTimer = null;
     }
+  }
+
+  function handleHostReconnectFailure(error) {
+    if (state.mode !== "room" || state.role !== "guest" || state.isLeaving || state.hostReconnectAttempts < 1) {
+      return false;
+    }
+
+    const attempt = state.hostReconnectAttempts;
+    if (state.hostReconnectFailureHandledAttempt === attempt) {
+      return true;
+    }
+    state.hostReconnectFailureHandledAttempt = attempt;
+
+    const exhausted = !state.roomEstablished && attempt >= ROOM_SERVICE_MAX_RETRIES;
+    const shouldPromoteCoordinator = state.roomEstablished
+      && attempt >= ESTABLISHED_HOST_RECONNECT_MAX_RETRIES;
+
+    if (exhausted) {
+      showToast("参加先のルームが見つかりません。");
+      return true;
+    }
+
+    if (shouldPromoteCoordinator) {
+      const previousHostId = state.hostId;
+      if (previousHostId && previousHostId !== state.peerId) {
+        removeParticipant(previousHostId, { broadcast: false, playTone: false });
+      }
+      showToast("参加受付を引き継いでいます。");
+      electRoomCoordinator(previousHostId).catch(handleFatalError);
+      return true;
+    }
+
+    if (attempt === 1) {
+      const message = state.roomEstablished
+        ? "参加受付の再接続を待っています。"
+        : error?.type === "peer-unavailable"
+          ? "参加先のルームへ接続しています。"
+          : "ルームへの接続を再試行しています。";
+      showToast(message);
+    }
+    scheduleHostReconnect();
+    return true;
+  }
+
+  function isPendingHostReconnectError(error) {
+    return error?.type === "peer-unavailable"
+      && state.mode === "room"
+      && state.role === "guest"
+      && !state.isLeaving
+      && !state.hostConnection?.open
+      && state.hostReconnectAttempts > 0;
   }
 
   function scheduleParticipantPeerReconnect(delayMs = ROOM_SERVICE_RETRY_MS) {
@@ -711,6 +736,7 @@
       connection.on("open", () => {
         opened = true;
         state.hostReconnectAttempts = 0;
+        state.hostReconnectFailureHandledAttempt = 0;
         sendData(connection, {
           type: "join",
           peerId: state.peerId,
@@ -858,6 +884,7 @@
       state.hostId = isValidPeerId(message.hostId) ? message.hostId : state.hostId;
       state.roomEstablished = true;
       state.hostReconnectAttempts = 0;
+      state.hostReconnectFailureHandledAttempt = 0;
       cancelHostReconnect();
       const peerIds = Array.isArray(message.peers) ? message.peers : [];
       peerIds
@@ -1102,8 +1129,15 @@
     }
 
     if (state.barcodeDetector) {
-      const codes = await state.barcodeDetector.detect(video);
-      return codes[0]?.rawValue || "";
+      try {
+        const codes = await state.barcodeDetector.detect(video);
+        const value = codes[0]?.rawValue || "";
+        if (value) {
+          return value;
+        }
+      } catch {
+        state.barcodeDetector = null;
+      }
     }
 
     if (typeof window.jsQR !== "function") {
@@ -1948,6 +1982,7 @@
       state.role = "host";
       cancelHostReconnect();
       state.hostReconnectAttempts = 0;
+      state.hostReconnectFailureHandledAttempt = 0;
       if (state.hostConnection) {
         state.suppressHostCloseNotice = true;
         state.hostConnection.close();
@@ -1961,6 +1996,7 @@
       closeRoomServicePeer();
       cancelRoomServicePeerRecover();
       state.hostReconnectAttempts = 0;
+      state.hostReconnectFailureHandledAttempt = 0;
       scheduleHostReconnect(ROOM_SERVICE_RETRY_MS);
     }
 
@@ -2946,6 +2982,7 @@
     state.muted = false;
     state.lastHeadsetActionAt = 0;
     state.hostReconnectAttempts = 0;
+    state.hostReconnectFailureHandledAttempt = 0;
     state.locationNoticeShown = false;
     state.roomEstablished = false;
     state.participants.clear();
@@ -3052,6 +3089,11 @@
   }
 
   function handlePeerError(error) {
+    if (isPendingHostReconnectError(error)) {
+      handleHostReconnectFailure(error);
+      return;
+    }
+
     const message = error?.type === "peer-unavailable"
       ? "参加先のルームが見つかりません。"
       : error?.message || "PeerJS接続でエラーが発生しました。";
