@@ -39,6 +39,8 @@
   const VAD_NOISE_MULTIPLIER = 2.4;
   const VAD_NOISE_OFFSET = 0.012;
   const VAD_HANGOVER_TICKS = 1;
+  const PARTICIPANT_SPEAKING_ENERGY_THRESHOLD = VAD_MIN_VOICE_ENERGY;
+  const PARTICIPANT_SPEAKING_HOLD_MS = 900;
   const LOCATION_WATCH_MAXIMUM_AGE_MS = 15000;
   const LOCATION_WATCH_TIMEOUT_MS = 20000;
   const LOCATION_STALE_MS = 45000;
@@ -1271,6 +1273,7 @@
     });
     state.remoteProcessors.delete(peerId);
     setParticipantSuppression(peerId, 0);
+    setParticipantSpeaking(peerId, false);
   }
 
   async function startScanner() {
@@ -1931,6 +1934,9 @@
 
     updateMuteButton();
     updateMediaSessionState();
+    if (state.muted) {
+      setParticipantSpeaking(state.peerId, false);
+    }
     return true;
   }
 
@@ -1985,6 +1991,72 @@
     renderParticipants();
   }
 
+  function updateParticipantSpeakingFromFeature(peerId, feature, now) {
+    if (!peerId || !state.participants.has(peerId)) {
+      return;
+    }
+
+    const participant = state.participants.get(peerId);
+    const isLoudEnough = Boolean(
+      feature?.active
+      && feature.energy >= PARTICIPANT_SPEAKING_ENERGY_THRESHOLD,
+    );
+
+    if (isLoudEnough) {
+      participant.speakingUntil = now + PARTICIPANT_SPEAKING_HOLD_MS;
+    }
+
+    const nextSpeaking = (participant.speakingUntil || 0) > now;
+    if (Boolean(participant.speaking) === nextSpeaking) {
+      state.participants.set(peerId, participant);
+      return;
+    }
+
+    participant.speaking = nextSpeaking;
+    if (!nextSpeaking) {
+      participant.speakingUntil = 0;
+    }
+    state.participants.set(peerId, participant);
+    renderParticipants();
+  }
+
+  function setParticipantSpeaking(peerId, speaking) {
+    if (!peerId || !state.participants.has(peerId)) {
+      return;
+    }
+
+    const participant = state.participants.get(peerId);
+    const nextSpeaking = Boolean(speaking);
+    if (Boolean(participant.speaking) === nextSpeaking) {
+      if (!nextSpeaking && participant.speakingUntil) {
+        participant.speakingUntil = 0;
+        state.participants.set(peerId, participant);
+      }
+      return;
+    }
+
+    participant.speaking = nextSpeaking;
+    participant.speakingUntil = nextSpeaking ? performance.now() + PARTICIPANT_SPEAKING_HOLD_MS : 0;
+    state.participants.set(peerId, participant);
+    renderParticipants();
+  }
+
+  function clearParticipantSpeakingStates() {
+    let changed = false;
+
+    state.participants.forEach((participant) => {
+      if (participant.speaking || participant.speakingUntil) {
+        participant.speaking = false;
+        participant.speakingUntil = 0;
+        changed = true;
+      }
+    });
+
+    if (changed) {
+      renderParticipants();
+    }
+  }
+
   function touchParticipant(peerId, participantState = "接続中") {
     if (!peerId || peerId === state.peerId) {
       return;
@@ -2026,6 +2098,7 @@
       const status = document.createElement("span");
       const meter = document.createElement("span");
       const suppression = participant.suppressionPercent || 0;
+      const isSpeaking = Boolean(participant.speaking);
       const isSelf = peerId === state.peerId;
       const isHost = peerId === state.hostId;
 
@@ -2036,7 +2109,14 @@
       li.classList.toggle("is-self", isSelf);
       li.classList.toggle("is-host", isHost);
       li.classList.toggle("is-suppressed", suppression >= 10);
-      status.textContent = suppression >= 10 ? `近接抑制 ${suppression}%` : participant.state || "接続中";
+      li.classList.toggle("is-speaking", isSpeaking);
+      if (isSpeaking && suppression >= 10) {
+        status.textContent = `発話中 / 抑制 ${suppression}%`;
+      } else if (isSpeaking) {
+        status.textContent = "発話中";
+      } else {
+        status.textContent = suppression >= 10 ? `近接抑制 ${suppression}%` : participant.state || "接続中";
+      }
       meter.style.setProperty("--suppression", `${suppression}%`);
 
       if (isSelf && state.displayNameEditMode) {
@@ -2543,6 +2623,7 @@
     state.localFrequencyData = null;
     state.localVad = null;
     state.localFeatureHistory = [];
+    setParticipantSpeaking(state.peerId, false);
   }
 
   function stopSilentAudioTrack() {
@@ -2949,24 +3030,28 @@
 
   function runProximityTick() {
     if (state.mode !== "room" || !state.localAnalyser || !state.audioContext || state.audioContext.state !== "running") {
+      clearParticipantSpeakingStates();
       return;
     }
 
     const now = performance.now();
     const localFeature = readAudioFeature(state.localAnalyser, state.localFrequencyData, state.localVad);
+    updateParticipantSpeakingFromFeature(state.peerId, state.muted ? null : localFeature, now);
     if (localFeature.active) {
       state.localFeatureHistory.push({ ...localFeature, time: now });
     }
     state.localFeatureHistory = state.localFeatureHistory.filter((feature) => now - feature.time <= PROXIMITY_HISTORY_MS);
 
     state.remoteProcessors.forEach((processor, peerId) => {
+      const remoteFeature = readAudioFeature(processor.analyser, processor.frequencyData, processor.vad);
+      updateParticipantSpeakingFromFeature(peerId, remoteFeature, now);
+
       const locationGate = evaluateLocationGate(peerId);
       if (locationGate.skip) {
         releaseRemoteSuppression(peerId, processor);
         return;
       }
 
-      const remoteFeature = readAudioFeature(processor.analyser, processor.frequencyData, processor.vad);
       const proximityResult = estimateProximity(remoteFeature, now);
       updateRemoteSuppression(peerId, processor, proximityResult);
     });
