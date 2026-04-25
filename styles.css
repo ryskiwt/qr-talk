@@ -180,7 +180,8 @@ main {
   gap: 8px;
 }
 
-.mute-button.is-muted {
+.mute-button.is-muted,
+.pocket-mute-button.is-muted {
   color: #ffe8e6;
   background: var(--danger-dark);
   border-color: #72302d;
@@ -211,7 +212,8 @@ main {
   transition: opacity 120ms ease;
 }
 
-.mute-button.is-muted .mute-slash {
+.mute-button.is-muted .mute-slash,
+.pocket-mute-button.is-muted .mute-slash {
   opacity: 1;
 }
 
@@ -300,7 +302,7 @@ main {
 }
 
 .control-grid {
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
 }
 
 .device-panel {
@@ -561,12 +563,6 @@ main {
   align-items: center;
   justify-content: center;
   gap: 8px;
-}
-
-.pocket-mute-button.is-muted {
-  color: #ffe8e6;
-  background: var(--danger-dark);
-  border-color: #72302d;
 }
 
 .hidden {

@@ -100,6 +100,17 @@
                   </span>
                   <span id="muteButtonText">ミュート OFF</span>
                 </button>
+                <button class="control-button mute-button" id="speakerMuteButton" type="button" aria-pressed="false">
+                  <span class="mute-icon" aria-hidden="true">
+                    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" focusable="false">
+                      <path d="M11 5 6 9H3v6h3l5 4z"></path>
+                      <path d="M15.5 8.5a5 5 0 0 1 0 7"></path>
+                      <path d="M18.5 5.5a9 9 0 0 1 0 13"></path>
+                      <path class="mute-slash" d="M4 4l16 16"></path>
+                    </svg>
+                  </span>
+                  <span id="speakerMuteButtonText">スピーカー ON</span>
+                </button>
                 <button class="control-button" id="pocketLockButton" type="button">ポケットロック</button>
                   <button class="control-button control-button-danger" id="leaveButton" type="button">退出</button>
                 </div>
@@ -142,6 +153,17 @@
               </svg>
             </span>
             <span id="pocketMuteHoldText">長押しでミュート</span>
+          </button>
+          <button class="pocket-hold-button pocket-mute-button" id="pocketSpeakerMuteHoldButton" type="button" aria-pressed="false">
+            <span class="mute-icon" aria-hidden="true">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" focusable="false">
+                <path d="M11 5 6 9H3v6h3l5 4z"></path>
+                <path d="M15.5 8.5a5 5 0 0 1 0 7"></path>
+                <path d="M18.5 5.5a9 9 0 0 1 0 13"></path>
+                <path class="mute-slash" d="M4 4l16 16"></path>
+              </svg>
+            </span>
+            <span id="pocketSpeakerMuteHoldText">長押しでスピーカーミュート</span>
           </button>
           <button class="pocket-hold-button" id="unlockHoldButton" type="button">長押しで解除</button>
         </div>

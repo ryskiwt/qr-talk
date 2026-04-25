@@ -80,6 +80,8 @@
     copyLinkButton: $("#copyLinkButton"),
     muteButton: $("#muteButton"),
     muteButtonText: $("#muteButtonText"),
+    speakerMuteButton: $("#speakerMuteButton"),
+    speakerMuteButtonText: $("#speakerMuteButtonText"),
     pocketLockButton: $("#pocketLockButton"),
     leaveButton: $("#leaveButton"),
     audioInputSelect: $("#audioInputSelect"),
@@ -90,6 +92,8 @@
     pocketOverlay: $("#pocketOverlay"),
     pocketMuteHoldButton: $("#pocketMuteHoldButton"),
     pocketMuteHoldText: $("#pocketMuteHoldText"),
+    pocketSpeakerMuteHoldButton: $("#pocketSpeakerMuteHoldButton"),
+    pocketSpeakerMuteHoldText: $("#pocketSpeakerMuteHoldText"),
     unlockHoldButton: $("#unlockHoldButton"),
     toast: $("#toast"),
   };
@@ -133,12 +137,14 @@
     isLeaving: false,
     suppressHostCloseNotice: false,
     muted: false,
+    speakerMuted: false,
     preferredInputId: "",
     preferredOutputId: "",
     wakeLock: null,
     wakeWanted: false,
     unlockTimer: null,
     pocketMuteTimer: null,
+    pocketSpeakerMuteTimer: null,
     lastHeadsetActionAt: 0,
     hostReconnectTimer: null,
     hostReconnectAttempts: 0,
@@ -163,6 +169,7 @@
   function init() {
     bindEvents();
     updateMuteButton();
+    updateSpeakerMuteButton();
     const roomId = extractRoomId(window.location.href);
     if (roomId) {
       state.pendingRoomId = roomId;
@@ -194,6 +201,7 @@
     });
     els.leaveButton.addEventListener("click", () => leaveRoom("退出しました。").catch(handleFatalError));
     els.muteButton.addEventListener("click", () => toggleMute().catch(handleFatalError));
+    els.speakerMuteButton.addEventListener("click", toggleSpeakerMute);
     els.pocketLockButton.addEventListener("click", enablePocketLock);
     els.copyLinkButton.addEventListener("click", copyRoomLink);
     els.audioInputSelect.addEventListener("change", onInputDeviceChange);
@@ -207,6 +215,10 @@
     els.pocketMuteHoldButton.addEventListener("pointerup", cancelPocketMuteHold);
     els.pocketMuteHoldButton.addEventListener("pointercancel", cancelPocketMuteHold);
     els.pocketMuteHoldButton.addEventListener("pointerleave", cancelPocketMuteHold);
+    els.pocketSpeakerMuteHoldButton.addEventListener("pointerdown", beginPocketSpeakerMuteHold);
+    els.pocketSpeakerMuteHoldButton.addEventListener("pointerup", cancelPocketSpeakerMuteHold);
+    els.pocketSpeakerMuteHoldButton.addEventListener("pointercancel", cancelPocketSpeakerMuteHold);
+    els.pocketSpeakerMuteHoldButton.addEventListener("pointerleave", cancelPocketSpeakerMuteHold);
     document.addEventListener("visibilitychange", onVisibilityChange);
     window.addEventListener("beforeunload", notifyLeaveBeforeUnload);
 
@@ -1203,7 +1215,7 @@
     audio.autoplay = true;
     audio.playsInline = true;
     audio.srcObject = stream;
-    audio.volume = 1;
+    audio.volume = state.speakerMuted ? 0 : 1;
     audio.dataset.peerId = peerId;
     els.remoteAudioMount.append(audio);
     state.remoteAudios.set(peerId, audio);
@@ -1781,8 +1793,10 @@
       els.cancelScanButton,
       els.leaveButton,
       els.muteButton,
+      els.speakerMuteButton,
       els.pocketLockButton,
       els.pocketMuteHoldButton,
+      els.pocketSpeakerMuteHoldButton,
       els.unlockHoldButton,
     ].forEach((button) => {
       button.disabled = isBusy;
@@ -1906,6 +1920,23 @@
     return setMuteState(!state.muted);
   }
 
+  function toggleSpeakerMute() {
+    return setSpeakerMuteState(!state.speakerMuted);
+  }
+
+  function setSpeakerMuteState(nextMuted) {
+    if (state.speakerMuted === nextMuted) {
+      updateSpeakerMuteButton();
+      applyAllRemoteOutputVolumes();
+      return false;
+    }
+
+    state.speakerMuted = nextMuted;
+    updateSpeakerMuteButton();
+    applyAllRemoteOutputVolumes();
+    return true;
+  }
+
   async function setMuteState(nextMuted) {
     if (state.muted === nextMuted) {
       updateMuteButton();
@@ -1954,6 +1985,22 @@
     els.pocketMuteHoldButton.setAttribute("aria-pressed", String(state.muted));
     els.pocketMuteHoldButton.setAttribute("aria-label", state.muted ? "長押しでミュートを解除" : "長押しでミュート");
     els.pocketMuteHoldText.textContent = state.muted ? "長押しでミュート解除" : "長押しでミュート";
+  }
+
+  function updateSpeakerMuteButton() {
+    els.speakerMuteButton.classList.toggle("is-muted", state.speakerMuted);
+    els.speakerMuteButton.setAttribute("aria-pressed", String(state.speakerMuted));
+    els.speakerMuteButton.setAttribute("aria-label", state.speakerMuted ? "スピーカーミュートを解除" : "スピーカーミュート");
+    els.speakerMuteButtonText.textContent = state.speakerMuted ? "スピーカー OFF" : "スピーカー ON";
+    els.pocketSpeakerMuteHoldButton.classList.toggle("is-muted", state.speakerMuted);
+    els.pocketSpeakerMuteHoldButton.setAttribute("aria-pressed", String(state.speakerMuted));
+    els.pocketSpeakerMuteHoldButton.setAttribute(
+      "aria-label",
+      state.speakerMuted ? "長押しでスピーカーミュートを解除" : "長押しでスピーカーミュート",
+    );
+    els.pocketSpeakerMuteHoldText.textContent = state.speakerMuted
+      ? "長押しでスピーカー解除"
+      : "長押しでスピーカーミュート";
   }
 
   function addParticipant(peerId, participantState) {
@@ -3269,16 +3316,31 @@
     }
     processor.currentGain = clamp(processor.currentGain, PROXIMITY_MIN_GAIN, 1);
 
-    const audio = state.remoteAudios.get(peerId);
-    if (audio) {
-      audio.volume = processor.currentGain;
-    }
+    applyRemoteOutputVolume(peerId, processor.currentGain);
 
     const suppressionPercent = Math.round((1 - processor.currentGain) * 100);
     if (Math.abs((processor.suppressionPercent || 0) - suppressionPercent) >= 3) {
       processor.suppressionPercent = suppressionPercent;
       setParticipantSuppression(peerId, suppressionPercent);
     }
+  }
+
+  function applyRemoteOutputVolume(peerId, baseVolume) {
+    const audio = state.remoteAudios.get(peerId);
+    if (!audio) {
+      return;
+    }
+
+    const effectiveBaseVolume = Number.isFinite(baseVolume)
+      ? baseVolume
+      : state.remoteProcessors.get(peerId)?.currentGain ?? 1;
+    audio.volume = state.speakerMuted ? 0 : clamp(effectiveBaseVolume, 0, 1);
+  }
+
+  function applyAllRemoteOutputVolumes() {
+    state.remoteAudios.forEach((_audio, peerId) => {
+      applyRemoteOutputVolume(peerId);
+    });
   }
 
   function updateSuppressionLevel(processor) {
@@ -3399,6 +3461,7 @@
     state.peerId = null;
     state.suppressHostCloseNotice = false;
     state.muted = false;
+    state.speakerMuted = false;
     state.lastHeadsetActionAt = 0;
     resetHostReconnectState();
     state.locationNoticeShown = false;
@@ -3410,6 +3473,7 @@
     state.displayNameFocusRequested = false;
     state.suppressDisplayNameBlurCommit = false;
     updateMuteButton();
+    updateSpeakerMuteButton();
     updateMediaSessionState();
     els.audioUnlockButton.classList.add("hidden");
     disablePocketLock();
@@ -3468,6 +3532,7 @@
     els.pocketOverlay.classList.add("hidden");
     cancelUnlockHold();
     cancelPocketMuteHold();
+    cancelPocketSpeakerMuteHold();
   }
 
   function beginUnlockHold() {
@@ -3503,6 +3568,24 @@
     if (state.pocketMuteTimer) {
       window.clearTimeout(state.pocketMuteTimer);
       state.pocketMuteTimer = null;
+    }
+  }
+
+  function beginPocketSpeakerMuteHold() {
+    cancelPocketSpeakerMuteHold();
+    state.pocketSpeakerMuteTimer = window.setTimeout(() => {
+      state.pocketSpeakerMuteTimer = null;
+      const changed = toggleSpeakerMute();
+      if (changed) {
+        showToast(state.speakerMuted ? "スピーカーミュートしました。" : "スピーカーミュートを解除しました。");
+      }
+    }, UNLOCK_HOLD_MS);
+  }
+
+  function cancelPocketSpeakerMuteHold() {
+    if (state.pocketSpeakerMuteTimer) {
+      window.clearTimeout(state.pocketSpeakerMuteTimer);
+      state.pocketSpeakerMuteTimer = null;
     }
   }
 
