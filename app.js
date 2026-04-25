@@ -41,6 +41,7 @@
   const VAD_HANGOVER_TICKS = 1;
   const PARTICIPANT_SPEAKING_ENERGY_THRESHOLD = VAD_MIN_VOICE_ENERGY;
   const PARTICIPANT_SPEAKING_HOLD_MS = 900;
+  const LOCAL_MONITOR_GAIN = 0.04;
   const LOCATION_WATCH_MAXIMUM_AGE_MS = 15000;
   const LOCATION_WATCH_TIMEOUT_MS = 20000;
   const LOCATION_STALE_MS = 45000;
@@ -118,6 +119,7 @@
     proximityTimer: null,
     audioContext: null,
     localAudioSource: null,
+    localMonitorGain: null,
     localAnalyser: null,
     localFrequencyData: null,
     localVad: null,
@@ -751,6 +753,7 @@
       echoCancellation: true,
       noiseSuppression: true,
       autoGainControl: true,
+      latency: { ideal: 0.01 },
     };
 
     if (state.preferredInputId) {
@@ -1907,6 +1910,7 @@
     if (state.muted === nextMuted) {
       updateMuteButton();
       updateMediaSessionState();
+      updateLocalMonitorGain();
       return false;
     }
 
@@ -1934,6 +1938,7 @@
 
     updateMuteButton();
     updateMediaSessionState();
+    updateLocalMonitorGain();
     if (state.muted) {
       setParticipantSpeaking(state.peerId, false);
     }
@@ -2540,7 +2545,11 @@
     }
 
     if (!state.audioContext) {
-      state.audioContext = new AudioContextClass();
+      try {
+        state.audioContext = new AudioContextClass({ latencyHint: "interactive" });
+      } catch {
+        state.audioContext = new AudioContextClass();
+      }
     }
 
     if (state.audioContext.state === "suspended") {
@@ -2597,6 +2606,7 @@
       analyser.fftSize = 1024;
       analyser.smoothingTimeConstant = 0.55;
       source.connect(analyser);
+      connectLocalMonitor(source, audioContext);
 
       state.localAudioSource = source;
       state.localAnalyser = analyser;
@@ -2610,7 +2620,43 @@
     }
   }
 
+  function connectLocalMonitor(source, audioContext) {
+    disconnectLocalMonitor();
+
+    const gain = audioContext.createGain();
+    gain.gain.setValueAtTime(state.muted ? 0 : LOCAL_MONITOR_GAIN, audioContext.currentTime);
+    source.connect(gain);
+    gain.connect(audioContext.destination);
+    state.localMonitorGain = gain;
+  }
+
+  function updateLocalMonitorGain() {
+    if (!state.localMonitorGain || !state.audioContext) {
+      return;
+    }
+
+    const nextGain = state.muted ? 0 : LOCAL_MONITOR_GAIN;
+    const now = state.audioContext.currentTime;
+    state.localMonitorGain.gain.cancelScheduledValues(now);
+    state.localMonitorGain.gain.setTargetAtTime(nextGain, now, 0.012);
+  }
+
+  function disconnectLocalMonitor() {
+    if (!state.localMonitorGain) {
+      return;
+    }
+
+    try {
+      state.localMonitorGain.disconnect();
+    } catch {
+      // Already disconnected.
+    }
+    state.localMonitorGain = null;
+  }
+
   function disconnectLocalAudioAnalysis() {
+    disconnectLocalMonitor();
+
     if (state.localAudioSource) {
       try {
         state.localAudioSource.disconnect();
